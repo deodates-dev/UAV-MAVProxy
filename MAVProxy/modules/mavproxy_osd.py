@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 OSD Module
 Andy Piper, August 2020, Vendee, France
@@ -19,16 +19,13 @@ from MAVProxy.modules.lib import mp_settings
 class osd(mp_module.MPModule):
     def __init__(self, mpstate):
         """Initialise OSD module"""
-        super(osd, self).__init__(mpstate, "osd", "")
+        super().__init__(mpstate, "osd", "")
 
         self.request_id = 1
-        self.osd_settings = mp_settings.MPSettings(
-            [ ('verbose', bool, False),
-          ])
         self.add_command('osd', self.cmd_osd, "OSD module",
             ['param-set <5|6> <1|2|3|4|5|6|7|8|9> (PARAMETER) (TYPES)',
-             'param-show <5|6> <1|2|3|4|5|6|7|8|9>',
-             'set (OSDSETTING)'])
+             'param-show <5|6> <1|2|3|4|5|6|7|8|9>'
+            ])
         self.add_completion_function('(TYPES)', self.param_type_completion)
         self.type_map = {
             mavutil.mavlink.OSD_PARAM_NONE : "NONE",
@@ -54,8 +51,6 @@ class osd(mp_module.MPModule):
             self.param_set(args[1:])
         elif args[0] == "param-show":
             self.param_show(args[1:])
-        elif args[0] == "set":
-            self.osd_settings.command(args[1:])
         else:
             print(self.usage())
 

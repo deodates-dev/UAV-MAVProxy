@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 '''
 DataFlash Logging Module
@@ -30,7 +28,7 @@ class dataflash_logger(mp_module.MPModule):
     def __init__(self, mpstate):
         """Initialise module.  We start poking the UAV for messages after this
         is called"""
-        super(dataflash_logger, self).__init__(
+        super().__init__(
             mpstate,
             "dataflash_logger",
             "logging of mavlink dataflash messages"

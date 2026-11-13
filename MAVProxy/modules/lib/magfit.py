@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
 fit best estimate of magnetometer offsets, diagonals, off-diagonals, cmot and scaling using WMM target
@@ -7,16 +7,19 @@ fit best estimate of magnetometer offsets, diagonals, off-diagonals, cmot and sc
 from MAVProxy.modules.lib import wx_processguard
 from MAVProxy.modules.lib.wx_loader import wx
 
-import sys, time, os, math, copy
+import sys, time, os, math, copy, platform
 
 from pymavlink import mavutil
 from pymavlink import mavextra
 from pymavlink.rotmat import Vector3
 from pymavlink.rotmat import Matrix3
+from pymavlink.rotmat import rotations
 from MAVProxy.modules.lib import grapher
 from MAVProxy.modules.lib.multiproc_util import MPDataLogChildTask
 
 import matplotlib
+if platform.system() == "Windows":
+    matplotlib.use('wxagg')
 import matplotlib.pyplot as pyplot
 import numpy
 import datetime
@@ -50,6 +53,17 @@ class Correction:
         print("COMPASS_SCALE%s %.2f" % (mag_idx, self.scaling))
         if margs['CMOT']:
             print("COMPASS_MOTCT 2")
+
+def RotationIDToString(id):
+    '''map rotation number to a string'''
+    return rotations[id].name
+
+def StringToRotationID(s):
+    '''map rotation string to an index'''
+    for i in range(len(rotations)):
+        if rotations[i].name == s:
+            return i
+    return 0
 
 def correct(MAG, BAT, c):
     '''correct a mag sample, returning a Vector3'''
@@ -210,7 +224,7 @@ def remove_offsets(MAG, BAT, c):
     try:
         correction_matrix = correction_matrix.invert()
     except Exception:
-        return False
+        return None
 
     field = Vector3(MAG.MagX, MAG.MagY, MAG.MagZ)
     if BAT is not None and hasattr(BAT,'Curr') and not math.isnan(BAT.Curr):
@@ -220,13 +234,13 @@ def remove_offsets(MAG, BAT, c):
     field -= Vector3(MAG.OfsX, MAG.OfsY, MAG.OfsZ)
 
     if math.isnan(field.x) or math.isnan(field.y) or math.isnan(field.z):
-        return False
+        return None
     MAG.MagX = int(field.x)
     MAG.MagY = int(field.y)
     MAG.MagZ = int(field.z)
-    return True
+    return MAG
 
-def magfit(mlog, timestamp_in_range):
+def magfit(mlog, timestamp_in_range, save_plot=None):
     '''find best magnetometer offset fit to a log file'''
 
     global earth_field, declination
@@ -274,11 +288,16 @@ def magfit(mlog, timestamp_in_range):
         print("Earth field: %s  strength %.0f declination %.1f degrees" % (earth_field, earth_field.length(), declination))
 
     ATT_NAME = margs['Attitude']
-    print("Attitude source %s" % ATT_NAME);
+
+    mtypes = ['GPS',mag_msg,ATT_NAME,'BAT']
+    if ATT_NAME == "XKY0":
+        mtypes.append('ATT')
+    last_ATT = None
+    print("Attitude source %s mtypes=%s" % (ATT_NAME, mtypes))
 
     # extract MAG data
     while True:
-        msg = mlog.recv_match(type=['GPS',mag_msg,ATT_NAME,'BAT'])
+        msg = mlog.recv_match(type=mtypes)
         if msg is None:
             break
         in_range = timestamp_in_range(msg._timestamp)
@@ -290,11 +309,21 @@ def magfit(mlog, timestamp_in_range):
             earth_field = mavextra.expected_earth_field(msg)
             (declination,inclination,intensity) = mavextra.get_mag_field_ef(msg.Lat, msg.Lng)
             print("Earth field: %s  strength %.0f declination %.1f degrees" % (earth_field, earth_field.length(), declination))
+        if msg.get_type() == 'ATT':
+            # needed for XKY0 for yaw
+            last_ATT = msg
         if msg.get_type() == ATT_NAME:
             if getattr(msg, 'C', 0) != 0:
                 # use core zero for EKF attitude
                 continue
-            ATT = msg
+            if ATT_NAME == 'XKY0':
+                if last_ATT is None:
+                    continue
+                # get yaw from GSF, and roll/pitch from ATT
+                ATT = last_ATT
+                ATT.Yaw = math.degrees(msg.YC)
+            else:
+                ATT = msg
             ATT.Roll  += math.degrees(parameters['AHRS_TRIM_X'])
             ATT.Pitch += math.degrees(parameters['AHRS_TRIM_Y'])
             ATT.Yaw   += math.degrees(parameters['AHRS_TRIM_Z'])
@@ -334,11 +363,25 @@ def magfit(mlog, timestamp_in_range):
     else:
         force_scale = True
 
+    rot = None
+    orig_orient = int(parameters.get('COMPASS_ORIENT'+mag_idx,0))
+    new_orient = StringToRotationID(margs['Orientation'])
+    if orig_orient != new_orient:
+        rot = rotations[orig_orient].rt * rotations[new_orient].r
+
     # remove existing corrections
     data2 = []
     for (MAG,ATT,BAT) in data:
-        if remove_offsets(MAG, BAT, old_corrections):
-            data2.append((MAG,ATT,BAT))
+        MAG = remove_offsets(MAG, BAT, old_corrections)
+        if MAG is None:
+            continue
+        if rot is not None:
+            v = Vector3(MAG.MagX,MAG.MagY,MAG.MagZ)
+            v = rot * v
+            MAG.MagX = v.x
+            MAG.MagY = v.y
+            MAG.MagZ = v.z
+        data2.append((MAG,ATT,BAT))
     data = data2
 
     print("Extracted %u points" % len(data))
@@ -427,7 +470,78 @@ def magfit(mlog, timestamp_in_range):
     axs[2].set_title('Yaw Change (degrees)')
     axs[2].legend(loc='upper left')
 
-    pyplot.show(block=False)
+    if save_plot is not None:
+        fig.savefig(save_plot)
+        print("Saved plot to %s" % save_plot)
+    else:
+        pyplot.show(block=False)
+
+
+def main():
+    '''run magfit headless from the command line, saving the result plot to a file.
+
+    This exposes the same fit used by the MAVExplorer magfit GUI panel without
+    needing a display, so it can be scripted or run on a headless machine.
+    '''
+    global margs
+    from argparse import ArgumentParser
+    parser = ArgumentParser(description='magnetometer fit (headless)')
+    parser.add_argument('log', help='log file to process')
+    parser.add_argument('--mag', default='MAG[0]', help='magnetometer source, eg MAG[0]')
+    parser.add_argument('--attitude', default='ATT', help='attitude source: ATT, XKF1, GYRO or XKY0')
+    parser.add_argument('--orientation', default='ROTATION_NONE',
+                        help='sensor orientation, eg ROTATION_YAW_180')
+    parser.add_argument('--lat', type=float, default=0.0, help='latitude (0 to take from GPS)')
+    parser.add_argument('--lon', type=float, default=0.0, help='longitude (0 to take from GPS)')
+    parser.add_argument('--battery', type=int, default=1, help='battery instance for motor-current fit')
+    parser.add_argument('--reduce', type=int, default=1, help='use every Nth sample')
+    parser.add_argument('--offset-max', type=int, default=1500)
+    parser.add_argument('--scale-min', type=float, default=1.0)
+    parser.add_argument('--scale-max', type=float, default=1.0)
+    parser.add_argument('--elliptical', action='store_true', help='also fit diagonals/off-diagonals')
+    parser.add_argument('--diagonal-min', type=float, default=0.8)
+    parser.add_argument('--diagonal-max', type=float, default=1.2)
+    parser.add_argument('--offdiag-min', type=float, default=-0.2)
+    parser.add_argument('--offdiag-max', type=float, default=0.2)
+    parser.add_argument('--cmot', action='store_true', help='also fit motor-current interference')
+    parser.add_argument('--cmot-nochange', action='store_true')
+    parser.add_argument('--cmot-max', type=float, default=10.0)
+    parser.add_argument('--save-plot', default='magfit.png',
+                        help='save the result plot to this file instead of displaying it')
+    args = parser.parse_args()
+
+    if args.save_plot is not None:
+        pyplot.switch_backend('Agg')
+
+    margs = {
+        'Magnetometer': args.mag,
+        'Attitude': args.attitude,
+        'Orientation': args.orientation,
+        'Lattitude': args.lat,
+        'Longitude': args.lon,
+        'BatteryNum': args.battery,
+        'Reduce': args.reduce,
+        'Offsets': True,
+        'OffsetMax': args.offset_max,
+        'ScaleMin': args.scale_min,
+        'ScaleMax': args.scale_max,
+        'Elliptical': args.elliptical,
+        'DiagonalMin': args.diagonal_min,
+        'DiagonalMax': args.diagonal_max,
+        'OffDiagMin': args.offdiag_min,
+        'OffDiagMax': args.offdiag_max,
+        'CMOT': args.cmot,
+        'CMOT NoChange': args.cmot_nochange,
+        'CMOT Max': args.cmot_max,
+    }
+
+    mlog = mavutil.mavlink_connection(args.log)
+    # process the whole log
+    magfit(mlog, lambda timestamp: 0, save_plot=args.save_plot)
+
+
+if __name__ == '__main__':
+    main()
 
 class MagFit(MPDataLogChildTask):
     '''A class used to launch the MagFitUI in a child process'''
@@ -444,7 +558,7 @@ class MagFit(MPDataLogChildTask):
             An object capturing timestamp limits
         '''
 
-        super(MagFit, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # all attributes are implicitly passed to the child process 
         self.title = kwargs['title']
@@ -470,7 +584,7 @@ class MagFit(MPDataLogChildTask):
 
 class MagFitUI(wx.Dialog):
     def __init__(self, title, close_event, mlog, timestamp_in_range):
-        super(MagFitUI, self).__init__(None, title=title, size=(600, 800))
+        super().__init__(None, title=title, size=(600, 900), style=wx.DEFAULT_DIALOG_STYLE|wx.RESIZE_BORDER)
 
         # capture the close event, log and timestamp range function
         self.close_event = close_event
@@ -516,6 +630,7 @@ class MagFitUI(wx.Dialog):
         self.vbox.AddStretchSpacer()
         self.panel.SetSizer(self.vbox)
         self.idmap = {}
+        self.id_by_string = {}
         self.values = {}
         self.controls = {}
         self.callbacks = {}
@@ -533,11 +648,22 @@ class MagFitUI(wx.Dialog):
             att_choices.append('NKF1')
         if self.have_msg('XKF1'):
             att_choices.append('XKF1')
+        if self.have_msg('XKY0'):
+            att_choices.append('XKY0')
+        if self.have_msg('DCM'):
+            att_choices.append('DCM')
+
+        orientation_choices = [ r.name for r in rotations ]
+
+        default_orientation = RotationIDToString(int(self.mlog.params.get("COMPASS_ORIENT", 0)))
 
         # first row, Mag and attitude source
         self.StartRow('Source Selection')
-        self.AddCombo('Magnetometer', mag_choices)
+        self.AddCombo('Magnetometer', mag_choices, callback=self.change_mag)
         self.AddCombo('Attitude', att_choices)
+
+        self.StartRow('Orientation Selection')
+        self.AddCombo('Orientation', orientation_choices, default=default_orientation)
 
         self.StartRow('Position')
         self.AddSpinFloat("Lattitude", -90, 90, 0.000001, 0, digits=8)
@@ -552,8 +678,8 @@ class MagFitUI(wx.Dialog):
         self.AddSpinInteger("OffsetMax", 500, 3000, 1500)
 
         self.StartRow('Scale Factor Estimation')
-        self.AddSpinFloat("ScaleMin", 0.5, 2.0, 0.01, 1.0)
-        self.AddSpinFloat("ScaleMax", 0.5, 2.0, 0.01, 1.0)
+        self.AddSpinFloat("ScaleMin", 0.25, 4.0, 0.01, 1.0)
+        self.AddSpinFloat("ScaleMax", 0.25, 4.0, 0.01, 1.0)
 
         self.StartRow('Elliptical Estimation')
         self.AddCheckBox("Elliptical")
@@ -578,9 +704,24 @@ class MagFitUI(wx.Dialog):
         
         self.Center()
 
-    def close(self):
-        '''Set the close event'''
+    def original_orient(self, idx):
+        '''get original parameter orientation of a compass'''
+        mag_idx = '' if idx==0 else str(idx+1)
+        return int(self.mlog.params.get('COMPASS_ORIENT'+mag_idx,0))
 
+    def change_mag(self, cid):
+        '''change selected mag, update orientation'''
+        mag = int(self.values['Magnetometer'][4])
+        orig_orient = self.original_orient(mag)
+        orient_str = RotationIDToString(orig_orient)
+        c = self.controls[cid]
+        orient_id = self.id_by_string['Orientation']
+        orient_c = self.controls[orient_id]
+        orient_c.SetValue(orient_str)
+        self.values['Orientation'] = orient_str
+
+    def close(self, cid):
+        '''Set the close event'''
         self.close_event.set()
 
     def StartRow(self, label=None):
@@ -601,18 +742,23 @@ class MagFitUI(wx.Dialog):
 
     def AddControl(self, c, label, default):
         self.idmap[c.GetId()] = label
+        self.id_by_string[label] = c.GetId()
         self.controls[c.GetId()] = c
         self.values[label] = default
 
-    def AddCombo(self, label, choices):
+    def AddCombo(self, label, choices, default=None, callback=None):
+        if default is None:
+            default = choices[0]
         c = wx.ComboBox(choices=choices,
                         parent=self.panel,
                         style=0,
-                        value=choices[0])
-        self.AddControl(c, label, choices[0])
+                        value=default)
+        self.AddControl(c, label, default)
         c.Bind(wx.EVT_COMBOBOX, self.OnValue)
         self.row.Add(wx.StaticText(self.panel, label=label), 0, wx.LEFT, 20)
         self.row.Add(c, 0, wx.LEFT, 20)
+        if callback is not None:
+            self.callbacks[c.GetId()] = callback
 
     def AddButton(self, label, callback=None):
         c = wx.Button(self.panel, label=label)
@@ -630,7 +776,7 @@ class MagFitUI(wx.Dialog):
         self.row.Add(c, 0, wx.LEFT, 20)
         
     def AddSpinInteger(self, label, min_value, max_value, default):
-        c = wx.SpinCtrl(self.panel, -1)
+        c = wx.SpinCtrl(self.panel, -1, min=min_value, max=max_value)
         c.SetRange(min_value, max_value)
         c.SetValue(default)
         self.AddControl(c, label, default)
@@ -639,8 +785,8 @@ class MagFitUI(wx.Dialog):
         self.row.Add(wx.StaticText(self.panel, label=""), 0, wx.LEFT, 20)
         self.Bind(wx.EVT_SPINCTRL, self.OnValue)
 
-    def AddSpinFloat(self, label, min_value, max_value, increment, default, digits=2):
-        c = wx.SpinCtrlDouble(self.panel, -1)
+    def AddSpinFloat(self, label, min_value, max_value, increment, default, digits=4):
+        c = wx.SpinCtrlDouble(self.panel, -1, min=min_value, max=max_value)
         c.SetRange(min_value, max_value)
         c.SetValue(default)
         c.SetIncrement(increment)
@@ -652,7 +798,7 @@ class MagFitUI(wx.Dialog):
         else:
             s = s2
         if hasattr(c, 'GetSizeFromText'):
-            size = c.GetSizeFromText(s+" ")
+            size = c.GetSizeFromText(s+"xx")
             c.SetMinSize(size)
         self.AddControl(c, label, default)
         self.row.Add(wx.StaticText(self.panel, label=label), 0, wx.LEFT, 20)
@@ -662,13 +808,15 @@ class MagFitUI(wx.Dialog):
         
     def OnValue(self, event):
         self.values[self.idmap[event.GetId()]] = self.controls[event.GetId()].GetValue()
+        if event.GetId() in self.callbacks:
+            self.callbacks[event.GetId()](event.GetId())
 
     def OnButton(self, event):
         self.values[self.idmap[event.GetId()]] = True
         if event.GetId() in self.callbacks:
-            self.callbacks[event.GetId()]()
+            self.callbacks[event.GetId()](event.GetId())
 
-    def run(self):
+    def run(self, cid):
         global margs
         margs = self.values
-        magfit(self.mlog, self.timestamp_in_range)
+        magfit(self.mlog,self.timestamp_in_range)

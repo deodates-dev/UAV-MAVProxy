@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''remote low level device operations'''
 
 import time, os, sys
@@ -8,7 +8,7 @@ from MAVProxy.modules.lib import mp_module
 
 class DeviceOpModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(DeviceOpModule, self).__init__(mpstate, "DeviceOp")
+        super().__init__(mpstate, "DeviceOp")
         self.add_command('devop', self.cmd_devop, "device operations",
                          ["<read|write> <spi|i2c>"])
         self.request_id = 1

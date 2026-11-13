@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''serial_control MAVLink handling'''
 
 import time, os, fnmatch, sys
@@ -8,7 +8,7 @@ from MAVProxy.modules.lib import mp_module
 
 class SerialModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(SerialModule, self).__init__(mpstate, "serial", "serial control handling")
+        super().__init__(mpstate, "serial", "serial control handling")
         self.add_command('serial', self.cmd_serial,
                          'remote serial control',
                          ['<lock|unlock|send>',

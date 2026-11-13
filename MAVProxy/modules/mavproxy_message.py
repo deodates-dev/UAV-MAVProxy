@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 Arbitrary Message Module
 Peter Barker, September 2017
@@ -14,7 +14,7 @@ from MAVProxy.modules.lib import mp_settings
 class message(mp_module.MPModule):
     def __init__(self, mpstate):
         """Initialise module"""
-        super(message, self).__init__(mpstate, "message", "")
+        super().__init__(mpstate, "message", "")
         self.status_callcount = 0
         self.boredom_interval = 10  # seconds
         self.last_bored = time.time()

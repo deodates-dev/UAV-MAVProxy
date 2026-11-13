@@ -1,7 +1,8 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''settings object for MAVProxy modules'''
 
 import time
+import fnmatch
 
 class MPSetting:
     def __init__(self, name, type, default, label=None, tab=None,
@@ -23,6 +24,15 @@ class MPSetting:
         self.choice = choice
         self.format = format
         self.digits = digits
+
+    def describe(self):
+        if self.choice is not None:
+            for v in self.choice:
+                if isinstance(v, tuple):
+                    (v, thisvalue) = v
+                    if thisvalue == self.value:
+                        return "%s(%d)" % (v, thisvalue)
+        return "%s" % self.value
 
     def set(self, value):
         '''set a setting'''
@@ -48,13 +58,23 @@ class MPSetting:
                 return False
         if self.choice is not None:
             found = False
+            options = []
             for v in self.choice:
-                if v.lower() == value.lower():
+                if isinstance(v, tuple):
+                    (v, thisvalue) = v
+                else:
+                    thisvalue = v
+                options.append(v)
+                if isinstance(value, self.type):
+                    if thisvalue == value:
+                        found = True
+                        break
+                if isinstance(value, str) and v.lower() == value.lower():
                     found = True
-                    value = v
+                    value = thisvalue
                     break
             if not found:
-                print("Must be one of %s" % str(self.choice))
+                print("Must be one of %s" % str(options))
                 return False
         self.value = value
         return True
@@ -141,12 +161,17 @@ class MPSettings(object):
 
     def show(self, v):
         '''show settings'''
-        print("%20s %s" % (v, getattr(self, v)))
+        print("%20s %s" % (v, self._vars[v].describe()))
+
+    def show_pattern(self, pattern):
+        '''show all settings'''
+        for setting in sorted(self._vars):
+            if fnmatch.fnmatch(setting, pattern):
+                self.show(setting)
 
     def show_all(self):
         '''show all settings'''
-        for setting in sorted(self._vars):
-            self.show(setting)
+        self.show_pattern('*')
 
     def list(self):
         '''list all settings'''
@@ -161,6 +186,10 @@ class MPSettings(object):
         if len(args) == 0:
             self.show_all()
             return
+        if args[0].find('*') != -1:
+            self.show_pattern(args[0])
+            return
+
         if getattr(self, args[0], [None]) == [None]:
             print("Unknown setting '%s'" % args[0])
             return

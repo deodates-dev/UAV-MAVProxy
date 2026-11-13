@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''monitor sensor consistancy'''
 
 import time, math
@@ -23,7 +23,7 @@ class sensors_report(object):
 
 class SensorsModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(SensorsModule, self).__init__(mpstate, "sensors", "monitor sensor consistancy")
+        super().__init__(mpstate, "sensors", "monitor sensor consistancy")
         self.add_command('sensors', self.cmd_sensors, "show key sensors")
         self.add_command('speed', self.cmd_speed, "enable/disable speed report")
 

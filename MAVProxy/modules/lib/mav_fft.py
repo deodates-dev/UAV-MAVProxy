@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
 extract ISBH and ISBD messages from AP_Logging files and produce FFT plots
@@ -26,7 +26,7 @@ class MavFFT(MPDataLogChildTask):
             An object capturing timestamp limits
         '''
 
-        super(MavFFT, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # all attributes are implicitly passed to the child process 
         self.xlimits = kwargs['xlimits']

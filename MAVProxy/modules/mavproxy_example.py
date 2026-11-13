@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 Example Module
 Peter Barker, September 2016
@@ -27,7 +27,7 @@ from MAVProxy.modules.lib import mp_settings
 class example(mp_module.MPModule):
     def __init__(self, mpstate):
         """Initialise module"""
-        super(example, self).__init__(mpstate, "example", "")
+        super().__init__(mpstate, "example", "")
         self.status_callcount = 0
         self.boredom_interval = 10 # seconds
         self.last_bored = time.time()

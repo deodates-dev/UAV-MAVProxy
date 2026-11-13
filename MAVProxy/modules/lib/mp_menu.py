@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 menu handling widgets for wx
 
@@ -9,6 +9,8 @@ November 2013
 from MAVProxy.modules.lib import mp_util
 from MAVProxy.modules.lib import multiproc
 import platform
+
+idmap = {}
 
 class MPMenuGeneric(object):
     '''a MP menu separator'''
@@ -51,6 +53,13 @@ class MPMenuItem(MPMenuGeneric):
         self.handler = handler
         self.handler_result = None
 
+    def __getstate__(self):
+        '''use __getstate__ to override pickle so that we don't propogate IDs across process boundaries'''
+        attr = self.__dict__.copy()
+        if hasattr(attr,'_id'):
+            del attr['_id']
+        return attr
+
     def find_selected(self, event):
         '''find the selected menu item'''
         if event.GetId() == self.id():
@@ -66,11 +75,19 @@ class MPMenuItem(MPMenuGeneric):
             self.handler_result = call()
 
     def id(self):
-        '''id used to identify the returned menu items
-        uses a 16 bit signed integer'''
-        # must be below SHRT_MAX
-        id = int(hash((self.name, self.returnkey))) % 32767
-        return id
+        '''id used to identify the returned menu items uses a 16 bit signed integer. We allocate these
+           on use, and use __getstate__ to avoid them crossing processs boundaries'''
+        if getattr(self, '_id', None) is None:
+            global idmap
+            import os
+            key_tuple = (os.getpid(), self.name, self.returnkey)
+            if key_tuple in idmap:
+                self._id = idmap[key_tuple]
+            else:
+                from MAVProxy.modules.lib.wx_loader import wx
+                self._id = wx.NewId()
+                idmap[key_tuple] = self._id
+        return self._id
 
     def _append(self, menu):
         '''append this menu item to a menu'''
@@ -118,6 +135,12 @@ class MPMenuRadio(MPMenuItem):
         self.choice = 0
         self.initial = selected
 
+    def __getstate__(self):
+        attr = self.__dict__.copy()
+        if hasattr(attr,'_ids'):
+            del attr['_ids']
+        return attr
+        
     def set_choices(self, items):
         '''set radio item choices'''
         self.items = items
@@ -128,11 +151,11 @@ class MPMenuRadio(MPMenuItem):
 
     def find_selected(self, event):
         '''find the selected menu item'''
-        first = self.id()
-        last = first + len(self.items) - 1
+        if not hasattr(self, '_ids'):
+            return None
         evid = event.GetId()
-        if evid >= first and evid <= last:
-            self.choice = evid - first
+        if evid in self._ids:
+            self.choice = self._ids.index(evid)
             return self
         return None
 
@@ -140,10 +163,14 @@ class MPMenuRadio(MPMenuItem):
         '''append this menu item to a menu'''
         from MAVProxy.modules.lib.wx_loader import wx
         submenu = wx.Menu()
+        if not hasattr(self, '_ids') or len(self._ids) != len(self.items):
+            self._ids = []
+            for i in range(len(self.items)):
+                self._ids.append(wx.NewId())
         for i in range(len(self.items)):
-            submenu.AppendRadioItem(self.id()+i, self.items[i], self.description)
+            submenu.AppendRadioItem(self._ids[i], self.items[i], self.description)
             if self.items[i] == self.initial:
-                submenu.Check(self.id()+i, True)
+                submenu.Check(self._ids[i], True)
         menu.AppendSubMenu(submenu, self.name)
 
     def __str__(self):
@@ -191,6 +218,17 @@ class MPMenuSubMenu(MPMenuGeneric):
                 return
         self.add(MPMenuSubMenu(submenu_path[0], []))
         self.add_to_submenu(submenu_path, item)
+
+    def remove_from_submenu(self, submenu_path, name):
+        '''remove a named item from a submenu using a menu path array'''
+        if len(submenu_path) == 0:
+            # separators have no name, so don't assume the attribute
+            self.items = [i for i in self.items if getattr(i, 'name', None) != name]
+            return
+        for m in self.items:
+            if isinstance(m, MPMenuSubMenu) and submenu_path[0] == m.name:
+                m.remove_from_submenu(submenu_path[1:], name)
+                return
 
     def combine(self, submenu):
         '''combine a new menu with an existing one'''
@@ -245,6 +283,16 @@ class MPMenuTop(object):
         names = set([x.name for x in items])
         self.items = list(filter(lambda x : x.name not in names, self.items))
 
+    def remove_from_submenu(self, submenu_path, name):
+        '''remove a named item from a submenu using a menu path array'''
+        if len(submenu_path) == 0:
+            self.remove(MPMenuSubMenu(name, []))
+            return
+        for m in self.items:
+            if isinstance(m, MPMenuSubMenu) and m.name == submenu_path[0]:
+                m.remove_from_submenu(submenu_path[1:], name)
+                return
+
     def add_to_submenu(self, submenu_path, item):
         '''
         add an item to a submenu using a menu path array
@@ -253,7 +301,12 @@ class MPMenuTop(object):
             if m.name == submenu_path[0]:
                 m.add_to_submenu(submenu_path[1:], item)
                 return
-        raise(ValueError("No submenu (%s) found" % (submenu_path[0])))
+        # new submenu
+        if len(submenu_path) > 1:
+            self.add(MPMenuSubMenu(submenu_path[0], []))
+            self.add_to_submenu(submenu_path, item)
+        else:
+            self.add(MPMenuSubMenu(submenu_path[0], [item]))
 
     def wx_menu(self):
         '''return a wx.MenuBar() for the menu'''
@@ -302,22 +355,303 @@ class MPMenuCallFileDialog(object):
             return None
         return "\"" + dlg.GetPath() + "\""
 
+
+class MPMenuCallDirDialog(object):
+    '''used to create a file folder dialog callback'''
+    def __init__(self, flags=None, title='Directory'):
+        self.title = title
+
+    def call(self):
+        '''show a directory chooser dialog'''
+        from MAVProxy.modules.lib.wx_loader import wx
+
+        dlg = wx.DirDialog(None, self.title, '')
+        if dlg.ShowModal() != wx.ID_OK:
+            return None
+        return "\"" + dlg.GetPath() + "\""
+
+
 class MPMenuCallTextDialog(object):
     '''used to create a value dialog callback'''
-    def __init__(self, title='Enter Value', default=''):
+    def __init__(self, title='Enter Value', default='', settings=None):
         self.title = title
         self.default = default
+        self.settings = settings
 
     def call(self):
         '''show a value dialog'''
         from MAVProxy.modules.lib.wx_loader import wx
+        title = self.title
         try:
-            dlg = wx.TextEntryDialog(None, self.title, self.title, defaultValue=str(self.default))
+            dlg = wx.TextEntryDialog(None, title, title, defaultValue=str(self.default))
         except TypeError:
-            dlg = wx.TextEntryDialog(None, self.title, self.title, value=str(self.default))
+            dlg = wx.TextEntryDialog(None, title, title, value=str(self.default))
         if dlg.ShowModal() != wx.ID_OK:
             return None
         return dlg.GetValue()
+
+# memory of last dropdowns
+last_dropdown_selection = {}
+last_value_selection = {}
+
+class MPMenuCallTextDropdownDialog(object):
+    '''used to create a value dialog with dropdown callback'''
+    def __init__(self, title='Enter Value', default='',
+                 dropdown_options=None,
+                 dropdown_label='Select option',
+                 default_dropdown=None):
+        self.title = title
+        self.default = default
+        self.default_dropdown = default_dropdown
+        self.dropdown_options = dropdown_options or []
+        self.dropdown_label = dropdown_label
+
+    def call(self):
+        '''show a value dialog with dropdown'''
+        from MAVProxy.modules.lib.wx_loader import wx
+        
+        # Create a custom dialog
+        dlg = wx.Dialog(None, title=self.title, size=(400, 150))
+        
+        # Create a vertical box sizer for the dialog
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Create a horizontal sizer for the text entry and dropdown
+        input_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Text entry label and control
+        text_label = wx.StaticText(dlg, label="Value:")
+        default = last_value_selection.get(self.title, self.default)
+        text_ctrl = wx.TextCtrl(dlg, value=str(default), size=(200, -1))
+        
+        # Add text control components to input sizer
+        input_sizer.Add(text_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        input_sizer.Add(text_ctrl, 1, wx.ALL | wx.EXPAND, 5)
+        
+        # Dropdown label and control
+        dropdown_label = wx.StaticText(dlg, label=self.dropdown_label)
+        dropdown_ctrl = wx.Choice(dlg, choices=self.dropdown_options)
+        
+        # Select first item by default if options exist
+        if self.dropdown_options:
+            default_idx = 0
+            for i in range(len(self.dropdown_options)):
+                if self.dropdown_options[i] == self.default_dropdown:
+                    default_idx = i
+            dropdown_ctrl.SetSelection(last_dropdown_selection.get(self.title,default_idx))
+
+        # Add dropdown components to input sizer
+        input_sizer.Add(dropdown_label, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+        input_sizer.Add(dropdown_ctrl, 0, wx.ALL | wx.EXPAND, 5)
+        
+        # Add the input sizer to the main sizer
+        main_sizer.Add(input_sizer, 0, wx.ALL | wx.EXPAND, 5)
+        
+        # Create button sizer with OK and Cancel buttons
+        button_sizer = dlg.CreateButtonSizer(wx.OK | wx.CANCEL)
+        main_sizer.Add(button_sizer, 0, wx.ALL | wx.ALIGN_CENTER, 10)
+        
+        # Set the sizer for the dialog
+        dlg.SetSizer(main_sizer)
+        
+        # Fit the dialog to its contents
+        dlg.Fit()
+        
+        # Show the dialog and get the result
+        if dlg.ShowModal() != wx.ID_OK:
+            return None
+        
+        text_value = text_ctrl.GetValue()
+        dropdown_index = dropdown_ctrl.GetSelection()
+        dropdown_value = self.dropdown_options[dropdown_index] if dropdown_index != -1 and self.dropdown_options else ""
+
+        last_dropdown_selection[self.title] = dropdown_index
+        last_value_selection[self.title] = text_value
+
+        # Return tuple with text value and selected dropdown value
+        return text_value + " " + dropdown_value
+
+class MPMenuCallMultiTextDropdownDialog(object):
+    '''used to create a dialog callback with multiple values and optional dropdowns.
+
+    Each field is a (label, default) tuple, and each dropdown a
+    (label, options, default) tuple.  An extra trailing element - a key -
+    may be added to either (i.e. (label, default, key) or
+    (label, options, default, key)); when present the corresponding value
+    is emitted as "key=value", otherwise the bare value is emitted.
+    '''
+    def __init__(self, title='Enter Values', fields=None, dropdowns=None):
+        self.title = title
+        self.fields = fields or []
+        self.dropdowns = dropdowns or []
+
+    @classmethod
+    def from_arg_spec(cls, title, spec, ctx=None):
+        '''build a dialog from a command argument spec.
+
+        spec is an ordered dict of key->facets (see
+        MPModule.parse_key_value_spec).  Each entry that carries a 'label'
+        becomes a widget emitting "key=value": a dropdown when it has an
+        'options' list, otherwise a text field.  Entries without a 'label'
+        (e.g. keys entered another way) are skipped.  A 'default' facet may
+        be a plain value or a callable, which is passed ctx and evaluated
+        now (when the menu item is created) to produce the default.
+        '''
+        fields = []
+        dropdowns = []
+        for (key, facets) in spec.items():
+            if 'label' not in facets:
+                continue
+            default = facets.get('default', '')
+            if callable(default):
+                default = default(ctx)
+            if 'options' in facets:
+                dropdowns.append((facets['label'], facets['options'], default, key))
+            else:
+                fields.append((facets['label'], default, key))
+        return cls(title=title, fields=fields, dropdowns=dropdowns)
+
+    def call(self):
+        '''show a dialog with multiple value entries and optional dropdowns'''
+        from MAVProxy.modules.lib.wx_loader import wx
+
+        # Create a custom dialog
+        dlg = wx.Dialog(None, title=self.title, size=(400, 150))
+
+        # Create a vertical box sizer for the dialog
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # One row of label plus text entry per field
+        text_ctrls = []
+        for field in self.fields:
+            (label, default) = field[0], field[1]
+            input_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            text_label = wx.StaticText(dlg, label=label + ":")
+            memory_key = self.title + ":" + label
+            default = last_value_selection.get(memory_key, default)
+            text_ctrl = wx.TextCtrl(dlg, value=str(default), size=(200, -1))
+            text_ctrls.append(text_ctrl)
+            input_sizer.Add(text_label, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+            input_sizer.Add(text_ctrl, 0, wx.ALL | wx.EXPAND, 5)
+            main_sizer.Add(input_sizer, 0, wx.ALL | wx.EXPAND, 5)
+
+        # One row of label plus choice control per dropdown
+        dropdown_ctrls = []
+        for dropdown in self.dropdowns:
+            (label, options, default) = dropdown[0], dropdown[1], dropdown[2]
+            input_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            dropdown_label = wx.StaticText(dlg, label=label)
+            dropdown_ctrl = wx.Choice(dlg, choices=options)
+            dropdown_ctrls.append(dropdown_ctrl)
+
+            default_idx = 0
+            for i in range(len(options)):
+                if options[i] == default:
+                    default_idx = i
+            memory_key = self.title + ":" + label
+            dropdown_ctrl.SetSelection(last_dropdown_selection.get(memory_key, default_idx))
+
+            input_sizer.Add(dropdown_label, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 5)
+            input_sizer.Add(dropdown_ctrl, 0, wx.ALL | wx.EXPAND, 5)
+            main_sizer.Add(input_sizer, 0, wx.ALL | wx.EXPAND, 5)
+
+        # Create button sizer with OK and Cancel buttons
+        button_sizer = dlg.CreateButtonSizer(wx.OK | wx.CANCEL)
+        main_sizer.Add(button_sizer, 0, wx.ALL | wx.ALIGN_CENTER, 10)
+
+        # Set the sizer for the dialog
+        dlg.SetSizer(main_sizer)
+
+        # Fit the dialog to its contents
+        dlg.Fit()
+
+        # Show the dialog and get the result
+        if dlg.ShowModal() != wx.ID_OK:
+            return None
+
+        values = []
+        for (field, text_ctrl) in zip(self.fields, text_ctrls):
+            label = field[0]
+            key = field[2] if len(field) > 2 else None
+            text_value = text_ctrl.GetValue()
+            last_value_selection[self.title + ":" + label] = text_value
+            values.append("%s=%s" % (key, text_value) if key else text_value)
+
+        for (dropdown, dropdown_ctrl) in zip(self.dropdowns, dropdown_ctrls):
+            (label, options) = dropdown[0], dropdown[1]
+            key = dropdown[3] if len(dropdown) > 3 else None
+            dropdown_index = dropdown_ctrl.GetSelection()
+            if dropdown_index != -1:
+                dropdown_value = options[dropdown_index]
+                last_dropdown_selection[self.title + ":" + label] = dropdown_index
+                values.append("%s=%s" % (key, dropdown_value) if key else dropdown_value)
+
+        # Return the entered values, space-separated, dropdown values last
+        return " ".join(values)
+
+class MPMenuConfirmDialog(object):
+    '''used to create a confirmation dialog'''
+    def __init__(self, title='Confirmation', message='', callback=None, args=None):
+        self.title = title
+        self.message = message
+        self.callback = callback
+        self.args = args
+        t = multiproc.Process(target=self.thread)
+        t.start()
+
+    def thread(self):
+        mp_util.child_close_fds()
+        from MAVProxy.modules.lib import wx_processguard
+        from MAVProxy.modules.lib.wx_loader import wx
+        app = wx.App(False)
+        dlg = wx.MessageDialog(None, self.title, self.message, wx.YES|wx.NO)
+        ret = dlg.ShowModal()
+        if ret == wx.ID_YES and self.callback is not None:
+            self.callback(self.args)
+
+class MPChoiceDialog(object):
+    '''modal single-choice dialog run in a child process.
+    show() blocks and returns the selected index, or None if cancelled'''
+    def __init__(self, title='Choose', message='', choices=None):
+        self.title = title
+        self.message = message
+        self.choices = choices if choices is not None else []
+        self.pipe_recv, self.pipe_send = multiproc.Pipe(duplex=False)
+
+    def show(self, should_cancel=None):
+        '''block until a choice is made; should_cancel is an optional callable
+        polled to allow shutdown while waiting'''
+        child = multiproc.Process(target=self.child_task)
+        child.start()
+        self.pipe_send.close()
+        ret = None
+        while True:
+            if should_cancel is not None and should_cancel():
+                child.terminate()
+                break
+            try:
+                if self.pipe_recv.poll(0.2):
+                    ret = self.pipe_recv.recv()
+                    break
+            except (EOFError, OSError):
+                break
+        child.join()
+        if ret is not None and 0 <= ret < len(self.choices):
+            return ret
+        return None
+
+    def child_task(self):
+        mp_util.child_close_fds()
+        self.pipe_recv.close()
+        from MAVProxy.modules.lib import wx_processguard  # noqa
+        from MAVProxy.modules.lib.wx_loader import wx
+        app = wx.App(False)
+        dlg = wx.SingleChoiceDialog(None, self.message, self.title, self.choices)
+        if dlg.ShowModal() == wx.ID_OK:
+            self.pipe_send.send(dlg.GetSelection())
+        else:
+            self.pipe_send.send(None)
+        dlg.Destroy()
 
 class MPMenuChildMessageDialog(object):
     '''used to create a message dialog in a child process'''

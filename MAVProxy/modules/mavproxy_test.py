@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''test flight for DCM noise'''
 
 import time, math
@@ -12,7 +12,7 @@ from MAVProxy.modules.lib import mp_module
 
 class TestModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(TestModule, self).__init__(mpstate, "test", "test flight")
+        super().__init__(mpstate, "test", "test flight")
         self.state = TestState.INIT
         print("Module test loaded")
 

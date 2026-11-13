@@ -2,7 +2,7 @@
 generate dynamic obstacles for OBC 2018
 '''
 
-import time, pickle
+import time, json
 from math import *
 
 from MAVProxy.modules.lib import mp_module
@@ -16,17 +16,36 @@ import socket, time, random, math
 
 track_count = 0
 
-# object types
+# object types based on real world ICAO ranges
+# 000000 - 0003FFF - unallocated
+# 000000 – 003FFF: Unallocated.
+# 004000 – 0043FF: Zimbabwe.
+# 008000 – 00FFFF: South Africa.
+# 0D0000 – 0D7FFF: Mexico.
+# A00000 - AFFFFFF - USA
+# B00000 - BFFFFFF - reserved
+# C00000 - C3FFFFF - Canada
+# 780000 - 7BFFFFF - China
+# 7C0000 - 7FFFFFF - Australia
+
+# So lets put the codes for our fake generated obstacles  in the reserved B00000 range
+# and put aircraft > 0xA00000 which is actually where "real" aircraft should be
+# 'Aircraft'        : 0xA00000,
+# 'Weather'         : 0xB00000,
+# 'BirdMigrating'   : 0xB10000,
+# 'BirdOfPrey'      : 0xB20000
+# 'Drone'           : 0x0000000 - 0x003FFF (16383)
+
+# due to MAV_SYSID being sent as an ICAO code in ADSB_VEHILE we want to avoid using (at least) numbers < 256
+# this allows for MAV_SYSID to be up to 0x00BFFF - which is 16 bits. Something to keep in mind when extend MAV_SYSID
+# for some reason this breaks if the ICAO code is >= 0x00A000
 DNFZ_types = {
-    'Aircraft' : 1,
-    'Weather' : 20000,
-    'BirdMigrating' : 30000,
-    'BirdOfPrey' : 40000
+    'Aircraft'      : 0xA00000,
+    'Weather'       : 0xB00000,
+    'BirdMigrating' : 0xB10000,
+    'BirdOfPrey'    : 0xB20000,
+    'Drone'         : 0x000000,
 }
-
-from MAVProxy.modules.mavproxy_map import mp_elevation
-
-ElevationMap = mp_elevation.ElevationModel()
 
 gen_settings = mp_settings.MPSettings([("port", int, 45454),
                                        ('debug', int, 0),
@@ -43,15 +62,28 @@ gen_settings = mp_settings.MPSettings([("port", int, 45454),
     
 class DNFZ:
     '''a dynamic no-fly zone object'''
-    def __init__(self, DNFZ_type):
+    def __init__(self, DNFZ_type, elevationModel):
         if not DNFZ_type in DNFZ_types:
             raise('Bad DNFZ type %s' % DNFZ_type)
         self.DNFZ_type = DNFZ_type
-        self.pkt = {'category': 0, 'I010': {'SAC': {'val': 4, 'desc': 'System Area Code'}, 'SIC': {'val': 0, 'desc': 'System Identification Code'}}, 'I040': {'TrkN': {'val': 0, 'desc': 'Track number'}}, 'ts': 0, 'len': 25, 'I220': {'RoC': {'val': 0.0, 'desc': 'Rate of Climb/Descent'}}, 'crc': 'B52DA163', 'I130': {'Alt': {'max': 150000.0, 'min': -1500.0, 'val': 0.0, 'desc': 'Altitude'}}, 'I070': {'ToT': {'val': 0.0, 'desc': 'Time Of Track Information'}}, 'I105': {'Lat': {'val': 0, 'desc': 'Latitude in WGS.84 in twos complement. Range -90 < latitude < 90 deg.'}, 'Lon': {'val': 0.0, 'desc': 'Longitude in WGS.84 in twos complement. Range -180 < longitude < 180 deg.'}}, 'I080': {'SRC': {'meaning': '3D radar', 'val': 2, 'desc': 'Source of calculated track altitude for I062/130'}, 'FX': {'meaning': 'end of data item', 'val': 0, 'desc': ''}, 'CNF': {'meaning': 'Confirmed track', 'val': 0, 'desc': ''}, 'SPI': {'meaning': 'default value', 'val': 0, 'desc': ''}, 'MRH': {'meaning': 'Geometric altitude more reliable', 'val': 1, 'desc': 'Most Reliable Height'}, 'MON': {'meaning': 'Multisensor track', 'val': 0, 'desc': ''}}}
+        self.pkt = {'category': 0, 'I010': {'SAC': {'val': 4, 'desc': 'System Area Code'}, 'SIC': {'val': 0, 'desc': 'System Identification Code'}},
+                                    'I040': {'TrkN': {'val': 0, 'desc': 'Track number'}}, 'ts': 0, 'len': 25,
+                                    'I220': {'RoC': {'val': 0.0, 'desc': 'Rate of Climb/Descent'}}, 'crc': 'B52DA163',
+                                    'I130': {'Alt': {'max': 150000.0, 'min': -1500.0, 'val': 0.0, 'desc': 'Altitude'}},
+                                    'I070': {'ToT': {'val': 0.0, 'desc': 'Time Of Track Information'}},
+                                    'I105': {'Lat': {'val': 0, 'desc': 'Latitude in WGS.84 in twos complement. Range -90 < latitude < 90 deg.'},
+                                             'Lon': {'val': 0.0, 'desc': 'Longitude in WGS.84 in twos complement. Range -180 < longitude < 180 deg.'}},
+                                    'I080': {'SRC': {'meaning': '3D radar', 'val': 2, 'desc': 'Source of calculated track altitude for I062/130'},
+                                             'FX':  {'meaning': 'end of data item', 'val': 0, 'desc': ''},
+                                             'CNF': {'meaning': 'Confirmed track', 'val': 0, 'desc': ''},
+                                             'SPI': {'meaning': 'default value', 'val': 0, 'desc': ''},
+                                             'MRH': {'meaning': 'Geometric altitude more reliable', 'val': 1, 'desc': 'Most Reliable Height'},
+                                             'MON': {'meaning': 'Multisensor track', 'val': 0, 'desc': ''}}}
         self.speed = 0.0 # m/s
         self.heading = 0.0 # degrees
         self.desired_heading = None
         self.yawrate = 0.0
+        self.elevationModel = elevationModel
         # random initial position and heading
         self.randpos()
         self.setheading(random.uniform(0,360))
@@ -81,8 +113,7 @@ class DNFZ:
         '''return height above ground in feet'''
         lat = self.pkt['I105']['Lat']['val']
         lon = self.pkt['I105']['Lon']['val']
-        global ElevationMap
-        ret = ElevationMap.GetElevation(lat, lon)
+        ret = self.elevationModel.GetElevation(lat, lon)
         ret -= gen_settings.wgs84_to_AMSL
         return ret * 3.2807
 
@@ -165,13 +196,13 @@ class DNFZ:
     def __str__(self):
         return str(self.pkt)
 
-    def pickled(self):
-        return b'PICKLED:' + pickle.dumps(self.pkt)
+    def json_packet(self):
+        return b'JSON:' + json.dumps(self.pkt).encode('utf-8')
 
 class Aircraft(DNFZ):
     '''an aircraft that flies in a circuit'''
-    def __init__(self, speed=30.0, circuit_width=1000.0):
-        DNFZ.__init__(self, 'Aircraft')
+    def __init__(self, elevationModel, speed=30.0, circuit_width=1000.0):
+        DNFZ.__init__(self, 'Aircraft', elevationModel)
         self.setspeed(speed)
         self.circuit_width = circuit_width
         self.dist_flown = 0
@@ -184,14 +215,15 @@ class Aircraft(DNFZ):
         if self.dist_flown > self.circuit_width:
             self.desired_heading = self.heading + 90
             self.dist_flown = 0
-        if self.getalt() < self.ground_height() or self.getalt() > self.ground_height() + 2000:
+        ''' limit the altitude to ground_height + 100:2000 '''
+        if self.getalt() < (self.ground_height()) or self.getalt() > self.ground_height() + 2000:
             self.randpos()
             self.randalt()
 
 class BirdOfPrey(DNFZ):
     '''an bird that circles slowly climbing, then dives'''
-    def __init__(self):
-        DNFZ.__init__(self, 'BirdOfPrey')
+    def __init__(self, elevationModel):
+        DNFZ.__init__(self, 'BirdOfPrey', elevationModel)
         self.setspeed(16.0)
         self.radius = random.uniform(100,200)
         self.time_circling = 0
@@ -225,8 +257,8 @@ class BirdOfPrey(DNFZ):
 
 class BirdMigrating(DNFZ):
     '''an bird that circles slowly climbing, then dives'''
-    def __init__(self):
-        DNFZ.__init__(self, 'BirdMigrating')
+    def __init__(self, elevationModel):
+        DNFZ.__init__(self, 'BirdMigrating', elevationModel)
         self.setspeed(random.uniform(4,16))
         self.setyawrate(random.uniform(-0.2,0.2))
         self.randalt()
@@ -242,8 +274,8 @@ class BirdMigrating(DNFZ):
 
 class Weather(DNFZ):
     '''a weather system'''
-    def __init__(self):
-        DNFZ.__init__(self, 'Weather')
+    def __init__(self, elevationModel):
+        DNFZ.__init__(self, 'Weather', elevationModel)
         self.setspeed(random.uniform(1,4))
         self.lifetime = random.uniform(300,600)
         self.setalt(0)
@@ -260,7 +292,7 @@ class Weather(DNFZ):
 class GenobstaclesModule(mp_module.MPModule):
 
     def __init__(self, mpstate):
-        super(GenobstaclesModule, self).__init__(mpstate, "genobstacles", "OBC 2018 obstacle generator")
+        super().__init__(mpstate, "genobstacles", "OBC 2018 obstacle generator")
 
         self.add_command('genobstacles', self.cmd_genobstacles, "obstacle generator",
                          ["<start|stop|restart|clearall|status>",
@@ -346,13 +378,13 @@ class GenobstaclesModule(mp_module.MPModule):
                     print("No obstacle found at click point")
                     
         elif args[0] == "dropcloud":
-            self.cmd_dropobject(Weather())
+            self.cmd_dropobject(Weather(self.module('terrain').ElevationModel))
         elif args[0] == "dropeagle":
-            self.cmd_dropobject(BirdOfPrey())
+            self.cmd_dropobject(BirdOfPrey(self.module('terrain').ElevationModel))
         elif args[0] == "dropbird":
-            self.cmd_dropobject(BirdMigrating())
+            self.cmd_dropobject(BirdMigrating(self.module('terrain').ElevationModel))
         elif args[0] == "dropplane":
-            self.cmd_dropobject(Aircraft())
+            self.cmd_dropobject(Aircraft(self.module('terrain').ElevationModel))
         elif args[0] == "clearall":
             self.clearall()
         else:
@@ -373,19 +405,19 @@ class GenobstaclesModule(mp_module.MPModule):
 
         # some fixed wing aircraft
         for i in range(gen_settings.num_aircraft):
-            self.aircraft.append(Aircraft(random.uniform(10, 100), 2000.0))
+            self.aircraft.append(Aircraft(self.module('terrain').ElevationModel, random.uniform(10, 100), 2000.0))
 
         # some birds of prey
         for i in range(gen_settings.num_bird_prey):
-            self.aircraft.append(BirdOfPrey())
+            self.aircraft.append(BirdOfPrey(self.module('terrain').ElevationModel))
 
         # some migrating birds
         for i in range(gen_settings.num_bird_migratory):
-            self.aircraft.append(BirdMigrating())
+            self.aircraft.append(BirdMigrating(self.module('terrain').ElevationModel))
 
         # some weather systems
         for i in range(gen_settings.num_weather):
-            self.aircraft.append(Weather())
+            self.aircraft.append(Weather(self.module('terrain').ElevationModel))
         print("Started on port %u" % gen_settings.port)
 
     def stop(self):
@@ -427,7 +459,7 @@ class GenobstaclesModule(mp_module.MPModule):
         for a in self.aircraft:
             if not gen_settings.stop:
                 a.update(1.0)
-                self.pkt_queue.append(a.pickled())
+                self.pkt_queue.append(a.json_packet())
                 while len(self.pkt_queue) > len(self.aircraft)*2:
                     self.pkt_queue.pop(0)
                     

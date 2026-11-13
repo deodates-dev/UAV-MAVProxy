@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''This is a script that will help you identify controls on your joystick
 in order to create an appropriate joystick definition for the joystick
@@ -6,8 +6,6 @@ module.  You can run it like this:
 
     python -m MAVProxy.modules.mavproxy_joystick.findjoy
 '''
-
-from __future__ import print_function
 
 import argparse
 import collections

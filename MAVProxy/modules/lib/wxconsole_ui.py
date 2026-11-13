@@ -1,18 +1,27 @@
+import errno
 import time
-import os
+import platform
+import socket
 from MAVProxy.modules.lib import mp_menu
-from MAVProxy.modules.lib.wxconsole_util import Value, Text
+from MAVProxy.modules.lib.wxconsole_util import Value, Text, Title
 from MAVProxy.modules.lib.wx_loader import wx
 from MAVProxy.modules.lib import win_layout
+from MAVProxy.modules.lib import icon
 
 class ConsoleFrame(wx.Frame):
     """ The main frame of the console"""
 
-    def __init__(self, state, title, ico=None):
+    def __init__(self, state, title):
         self.state = state
         wx.Frame.__init__(self, None, title=title, size=(800,300))
-        if ico is not None:
-            self.SetIcon(ico.get_ico())
+        # different icons for MAVExplorer and MAVProxy
+        try:
+            if title == "MAVExplorer":
+                self.SetIcon(icon.SimpleIcon("EXPLORER").get_ico())
+            else:
+                self.SetIcon(icon.SimpleIcon("CONSOLE").get_ico())
+        except Exception:
+            pass
         self.panel = wx.Panel(self)
         self.panel.SetBackgroundColour('white')
         state.frame = self
@@ -22,6 +31,8 @@ class ConsoleFrame(wx.Frame):
 
         self.menu = None
         self.menu_callback = None
+        self.menu_open = False
+        self.pending_menu = None
         self.last_layout_send = time.time()
 
         self.control = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_AUTO_URL)
@@ -40,6 +51,9 @@ class ConsoleFrame(wx.Frame):
         self.timer.Start(100)
 
         self.Bind(wx.EVT_IDLE, self.on_idle)
+        self.Bind(wx.EVT_MENU, self.on_menu)
+        self.Bind(wx.EVT_MENU_OPEN, self.on_menu_open)
+        self.Bind(wx.EVT_MENU_CLOSE, self.on_menu_close)
         self.Bind(wx.EVT_TEXT_URL, self.on_text_url)
 
         self.Show(True)
@@ -53,6 +67,28 @@ class ConsoleFrame(wx.Frame):
             return
         ret.call_handler()
         state.child_pipe_send.send(ret)
+
+    def on_menu_open(self, event):
+        '''prevent an asynchronous menu update replacing an open popup'''
+        self.menu_open = True
+        event.Skip()
+
+    def on_menu_close(self, event):
+        '''apply the newest deferred menu after the native popup is gone'''
+        self.menu_open = False
+        event.Skip()
+        if self.pending_menu is not None:
+            wx.CallAfter(self.apply_pending_menu)
+
+    def apply_pending_menu(self):
+        '''install the newest menu description when no popup is active'''
+        if self.menu_open or self.pending_menu is None:
+            return
+        self.menu = self.pending_menu
+        self.pending_menu = None
+        self.SetMenuBar(self.menu.wx_menu())
+        self.Refresh()
+        self.Update()
 
     def on_text_url(self, event):
         '''handle double clicks on URL text'''
@@ -86,14 +122,23 @@ class ConsoleFrame(wx.Frame):
             self.timer.Stop()
             self.Destroy()
             return
-        while state.child_pipe_recv.poll():
+
+        while True:
+            try:
+                poll_success = state.child_pipe_recv.poll()
+                if not poll_success:
+                    return
+            except socket.error as e:
+                if e.errno == errno.EPIPE:
+                    break
+                else:
+                    raise e
+
             try:
                 obj = state.child_pipe_recv.recv()
-            except EOFError:
-                self.timer.Stop()
-                self.Destroy()
-                return
-            
+            except Exception:
+                break
+                
             if isinstance(obj, Value):
                 # request to set a status field
                 if not obj.name in self.values:
@@ -110,7 +155,14 @@ class ConsoleFrame(wx.Frame):
                 value = self.values[obj.name]
                 value.SetForegroundColour(obj.fg)
                 value.SetBackgroundColour(obj.bg)
+                # workaround wx bug on windows
+                value._foregroundColour = obj.fg
                 value.SetLabel(obj.text)
+                if platform.system() == 'Windows':
+                    # more working around wx bugs in windows; without
+                    # these the display does not update on colour change
+                    value.Refresh()
+                    value.Update()
                 self.panel.Layout()
             elif isinstance(obj, Text):
                 '''request to add text to the console'''
@@ -125,13 +177,15 @@ class ConsoleFrame(wx.Frame):
                     self.control.AppendText(p.text)
                     self.control.SetDefaultStyle(oldstyle)
                 self.pending = []
+            elif isinstance(obj, Title):
+                self.SetTitle(obj.title)
             elif isinstance(obj, mp_menu.MPMenuTop):
-                if obj is not None:
-                    self.SetMenuBar(None)
-                    self.menu = obj
-                    self.SetMenuBar(self.menu.wx_menu())
-                    self.Bind(wx.EVT_MENU, self.on_menu)
-                self.Refresh()
-                self.Update()
+                self.pending_menu = obj
+                if not self.menu_open:
+                    self.apply_pending_menu()
             elif isinstance(obj, win_layout.WinLayout):
                 win_layout.set_wx_window_layout(self, obj)
+
+        self.timer.Stop()
+        self.Destroy()
+        return

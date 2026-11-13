@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 System_Time Module
 Peter barker, May 2018
@@ -16,7 +16,7 @@ from MAVProxy.modules.lib import mp_settings
 class system_time(mp_module.MPModule):
     def __init__(self, mpstate):
         """Initialise module"""
-        super(system_time, self).__init__(mpstate, "system_time", "")
+        super().__init__(mpstate, "system_time", "")
         self.last_sent = 0
         self.last_sent_ts1 = 0
         self.last_sent_timesync = 0

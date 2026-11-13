@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 UBX UBLOX Module
 Peter Barker, April 2017
@@ -22,7 +22,7 @@ from MAVProxy.modules.lib import mp_settings
 class ublox(mp_module.MPModule):
     def __init__(self, mpstate):
         """Initialise module"""
-        super(ublox, self).__init__(mpstate, "ublox", "")
+        super().__init__(mpstate, "ublox", "")
         self.auto = True
         self.verbose = False
         self.api_token = self.read_api_token()

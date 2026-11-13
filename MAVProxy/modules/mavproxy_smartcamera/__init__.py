@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #***************************************************************************
 #                      Copyright Jaime Machuca
 #***************************************************************************
@@ -12,7 +12,7 @@
 #                it what cameras are connected, it then tries to connect to the
 #                cameras and populates a list of available cameras.
 #
-# Environment  : Python 2.7 Code. Intended to be included in MAVproxy as a Module
+# Environment  : Intended to be included in MAVproxy as a Module
 #
 # Responsible  : Jaime Machuca
 #
@@ -71,7 +71,7 @@ class SmartCameraModule(mp_module.MPModule):
 #****************************************************************************
 
     def __init__(self, mpstate):
-        super(SmartCameraModule, self).__init__(mpstate, "SmartCamera", "SmartCamera commands")
+        super().__init__(mpstate, "SmartCamera", "SmartCamera commands")
         self.add_command('camtrigger', self.__vCmdCamTrigger, "Trigger camera")
         self.add_command('connectcams', self.__vCmdConnectCameras, "Connect to Cameras")
         self.add_command('setCamISO', self.__vCmdSetCamISO, "Set Camera ISO")

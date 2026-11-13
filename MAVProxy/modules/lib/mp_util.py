@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''common mavproxy utility functions'''
 
@@ -9,7 +9,16 @@ import io
 import sys
 import platform
 import warnings
+import time
+import re
 from math import cos, sin, tan, atan2, sqrt, radians, degrees, pi, log, fmod
+
+# MAVLink commands newer than some pymavlink releases know about -- 2.4.49
+# has neither of the first two, and DO_RETURN_PATH_START arrived in 2.4.43
+# -- so they are named here rather than looked up in the dialect
+MAV_CMD_DO_ORBIT = 34
+MAV_CMD_NAV_ARC_WAYPOINT = 36
+MAV_CMD_DO_RETURN_PATH_START = 188
 
 # Some platforms (CYGWIN and others) many not have the wx library
 # use imp to see if wx is on the path
@@ -19,24 +28,36 @@ if platform.system() == 'Windows':
     # auto-detection is failing on windows, for an unknown reason
     has_wxpython = True
 else:
-    import imp
     try:
-        imp.find_module('wx')
-        has_wxpython = True
-    except ImportError as e:
-        pass
+        import importlib
+        try:
+            import importlib.util
+        except ImportError:
+            pass
+
+        if importlib.util.find_spec('wx') is not None:
+            has_wxpython = True
+    except (ImportError, ModuleNotFoundError):
+        import imp
+        try:
+            imp.find_module('wx')
+            has_wxpython = True
+        except ImportError as e:
+            pass
 
 radius_of_earth = 6378100.0 # in meters
 
 def wrap_360(angle):
     '''wrap an angle to 0..360 degrees'''
+    if angle < 0:
+        return 360.0 - math.fmod(abs(angle),360)
     return math.fmod(angle, 360.0)
 
 def wrap_180(angle):
     '''wrap an angle to -180..180 degrees'''
-    if angle >= -180 and angle < 180:
-        return angle
-    a = math.fmod(angle+180, 360.0)-180.0
+    a = wrap_360(angle)
+    if a > 180:
+        a = a - 360
     return a
 
 def gps_distance(lat1, lon1, lat2, lon2):
@@ -45,26 +66,27 @@ def gps_distance(lat1, lon1, lat2, lon2):
     thanks to http://www.movable-type.co.uk/scripts/latlong.html
     and http://www.edwilliams.org/avform147.htm#Rhumb
     '''
+    # take the shorter way around the globe, so that a pair either side of
+    # the antimeridian is a short hop rather than most of the way around
+    dlon = radians(wrap_180(lon2 - lon1))
     lat1 = radians(lat1)
     lat2 = radians(lat2)
-    lon1 = radians(lon1)
-    lon2 = radians(lon2)
 
     if abs(lat2-lat1) < 1.0e-15:
         q = cos(lat1)
     else:
         q = (lat2-lat1)/log(tan(lat2/2+pi/4)/tan(lat1/2+pi/4))
-    d = sqrt((lat2-lat1)**2 + q**2 * (lon2-lon1)**2)
+    d = sqrt((lat2-lat1)**2 + q**2 * dlon**2)
     return d * radius_of_earth
 
 def gps_bearing(lat1, lon1, lat2, lon2):
     '''return rhumb bearing between two points in degrees, in range 0-360
     thanks to http://www.movable-type.co.uk/scripts/latlong.html'''
+    # as for gps_distance, head the short way around the antimeridian
+    dlon = radians(wrap_180(lon2 - lon1))
     lat1 = radians(lat1)
     lat2 = radians(lat2)
-    lon1 = radians(lon1)
-    lon2 = radians(lon2)
-    tc = -fmod(atan2(lon1-lon2,log(tan(lat2/2+pi/4)/tan(lat1/2+pi/4))),2*pi)
+    tc = -fmod(atan2(-dlon,log(tan(lat2/2+pi/4)/tan(lat1/2+pi/4))),2*pi)
     if tc < 0:
         tc += 2*pi
     return degrees(tc)
@@ -116,6 +138,424 @@ def gps_offset(lat, lon, east, north):
     bearing = degrees(atan2(east, north))
     distance = sqrt(east**2 + north**2)
     return gps_newpos(lat, lon, bearing, distance)
+
+
+def arc_centre_and_radius(lat1, lon1, lat2, lon2, arc_angle):
+    """return (centre_latlon, radius, start_bearing_from_centre) for a circular
+    arc running from (lat1,lon1) to (lat2,lon2) which sweeps arc_angle degrees.
+
+    Positive arc_angle is a clockwise arc, negative is counter-clockwise (as
+    per MAV_CMD_NAV_ARC_WAYPOINT).  Returns None if the arc is degenerate (a
+    zero-length sweep, or a sweep of a whole circle, neither of which define
+    a unique circle).
+    """
+    # arcs may sweep up to a full turn in either direction, so wrap into
+    # (-360, 360) rather than to +-180
+    arc_angle = fmod(arc_angle, 360.0)
+    if abs(arc_angle) < 1.0e-6:
+        return None
+    half = radians(abs(arc_angle) / 2.0)
+    if sin(half) < 1.0e-6:
+        return None
+    chord = gps_distance(lat1, lon1, lat2, lon2)
+    if chord < 1.0e-6:
+        return None
+    radius = chord / (2 * sin(half))
+    chord_bearing = gps_bearing(lat1, lon1, lat2, lon2)
+    # the centre lies 90 degrees to the right of the initial heading for a
+    # clockwise arc, 90 degrees to the left for a counter-clockwise arc:
+    if arc_angle > 0:
+        centre_bearing = chord_bearing - arc_angle/2.0 + 90
+    else:
+        centre_bearing = chord_bearing - arc_angle/2.0 - 90
+    centre = gps_newpos(lat1, lon1, centre_bearing, radius)
+    return (centre, radius, wrap_360(centre_bearing + 180))
+
+
+def arc_points(latlon1, latlon2, arc_angle, steps=None):
+    """return a list of latlon points along a circular arc from latlon1 to
+    latlon2 sweeping arc_angle degrees (positive is clockwise).  The returned
+    list includes both endpoints.  If the arc is degenerate then just the two
+    endpoints are returned."""
+    ret = arc_centre_and_radius(latlon1[0], latlon1[1],
+                                latlon2[0], latlon2[1],
+                                arc_angle)
+    if ret is None:
+        return [latlon1, latlon2]
+    (centre, radius, start_bearing) = ret
+    arc_angle = fmod(arc_angle, 360.0)
+    if steps is None:
+        # aim for roughly one segment every 3 degrees of sweep:
+        steps = int(constrain(abs(arc_angle) / 3.0, 8, 180))
+    points = [latlon1]
+    for i in range(1, steps):
+        bearing = start_bearing + arc_angle * (float(i) / steps)
+        points.append(gps_newpos(centre[0], centre[1], bearing, radius))
+    points.append(latlon2)
+    return points
+
+
+# takeoff items carry an altitude and often no position of their own: the
+# vehicle climbs from where it already is, which for a mission is home.
+# Numeric because mp_util does not import pymavlink at module scope
+TAKEOFF_COMMANDS = (22, 84)      # NAV_TAKEOFF, NAV_VTOL_TAKEOFF
+
+
+# what each kind of mission item is called where a map labels one, as the 2D
+# map has always labelled its waypoints.  Numeric for the same reason as
+# TAKEOFF_COMMANDS above
+MISSION_LABEL_SUFFIXES = {
+    22: "TOff",                       # NAV_TAKEOFF
+    189: "DLS",                       # DO_LAND_START
+    MAV_CMD_DO_RETURN_PATH_START: "DRPS",
+    82: "SW",                         # NAV_SPLINE_WAYPOINT
+    MAV_CMD_NAV_ARC_WAYPOINT: "AW",
+    17: "LU",                         # NAV_LOITER_UNLIM
+    18: "LT",                         # NAV_LOITER_TURNS
+    19: "LTime",                      # NAV_LOITER_TIME
+    31: "LAlt",                       # NAV_LOITER_TO_ALT
+    MAV_CMD_DO_ORBIT: "Orbit",
+    85: "VL",                         # NAV_VTOL_LAND
+}
+
+
+def mission_item_label(seq, command):
+    """the label a map puts on a mission item: its number, and what it is
+    where that is worth saying -- "3(DLS)" for a land start"""
+    suffix = MISSION_LABEL_SUFFIXES.get(command)
+    if suffix is None:
+        return str(seq)
+    return "%s(%s)" % (seq, suffix)
+
+
+def mission_cmd_has_location(command):
+    """whether a MAV_CMD's x/y are a latitude/longitude, from hasLocation in
+    the XML. Others, such as NAV_SCRIPT_TIME, use them for other values"""
+    from pymavlink import mavutil
+    cmd_enum = mavutil.mavlink.enums['MAV_CMD'].get(command)
+    if cmd_enum is None:
+        return False
+    # older pymavlink does not have the attribute
+    return getattr(cmd_enum, 'has_location', True)
+
+
+# vehicles which hold position at a loiter point rather than flying a circle
+# around it.  MAVProxy's own vehicle type names are accepted as well as the
+# MAV_TYPEs, since that is what a live module has to hand
+HOVERING_VEHICLE_NAMES = ['copter', 'sub']
+HOVERING_MAV_TYPE_NAMES = [
+    'MAV_TYPE_QUADROTOR', 'MAV_TYPE_COAXIAL', 'MAV_TYPE_HELICOPTER',
+    'MAV_TYPE_HEXAROTOR', 'MAV_TYPE_OCTOROTOR', 'MAV_TYPE_TRICOPTER',
+    'MAV_TYPE_DODECAROTOR', 'MAV_TYPE_SUBMARINE',
+]
+
+
+# MAV_TYPE names (without the MAV_TYPE_ prefix) of vehicles flown as
+# planes.  Old names are kept so we work with pymavlink from either side
+# of a rename; names pymavlink does not have are ignored
+PLANE_MAV_TYPE_NAMES = [
+    "FIXED_WING",
+    "FLAPPING_WING",
+    "VTOL_TAILSITTER_DUOROTOR",
+    "VTOL_TAILSITTER_QUADROTOR",
+    "VTOL_TILTROTOR",
+    "VTOL_FIXEDROTOR",
+    "VTOL_TAILSITTER",
+    "VTOL_TILTWING",
+
+    "VTOL_DUOROTOR",  # renamed to VTOL_TAILSITTER_DUOROTOR
+    "VTOL_QUADROTOR",  # renamed to VTOL_TAILSITTER_QUADROTOR
+    "VTOL_RESERVED2",  # renamed to VTOL_FIXEDROTOR
+    "VTOL_RESERVED3",  # renamed to VTOL_TAILSITTER
+    "VTOL_RESERVED4",  # renamed to VTOL_TILTWING
+]
+
+
+def mav_types(names):
+    """return the MAV_TYPE values for names (without the MAV_TYPE_
+    prefix), skipping any the installed pymavlink does not have"""
+    from pymavlink import mavutil
+    ret = []
+    for name in names:
+        value = getattr(mavutil.mavlink, f"MAV_TYPE_{name}", None)
+        if value is not None:
+            ret.append(value)
+    return ret
+
+
+def plane_mav_types():
+    """return the MAV_TYPE values of vehicles flown as planes"""
+    return mav_types(PLANE_MAV_TYPE_NAMES)
+
+
+def vehicle_hovers_to_loiter(vehicle):
+    """whether the vehicle holds position at a loiter point instead of
+    circling it.  vehicle is a MAV_TYPE or one of MAVProxy's vehicle type
+    names; None (we do not know) answers False, leaving the circle drawn"""
+    if vehicle is None:
+        return False
+    if isinstance(vehicle, str):
+        return vehicle in HOVERING_VEHICLE_NAMES
+    from pymavlink import mavutil
+    for name in HOVERING_MAV_TYPE_NAMES:
+        if getattr(mavutil.mavlink, name, None) == vehicle:
+            return True
+    return False
+
+
+def mission_circle_radius(command, params, default_radius=None, vehicle=None):
+    """return the signed radius in metres of the circle a mission item flies
+    about its own location -- the loiter commands and DO_ORBIT -- or None if
+    the item does not fly one.
+
+    A positive radius is a clockwise circle, negative counter-clockwise.
+    params is the item's param1..param4.  Items which leave the radius unset
+    ask for the vehicle's own default, which is default_radius here.
+
+    vehicle is the MAV_TYPE (or MAVProxy vehicle type name) flying the
+    mission, which decides the items that hold position instead of circling.
+    """
+    from pymavlink import mavutil
+    mavlink = mavutil.mavlink
+    # index within params of the parameter holding the radius
+    index = {
+        mavlink.MAV_CMD_NAV_LOITER_UNLIM: 2,
+        mavlink.MAV_CMD_NAV_LOITER_TURNS: 2,
+        mavlink.MAV_CMD_NAV_LOITER_TIME: 2,
+        mavlink.MAV_CMD_NAV_LOITER_TO_ALT: 1,
+        MAV_CMD_DO_ORBIT: 0,
+    }.get(command)
+    if index is None:
+        return None
+    if vehicle_hovers_to_loiter(vehicle) and command in (
+            mavlink.MAV_CMD_NAV_LOITER_UNLIM,
+            mavlink.MAV_CMD_NAV_LOITER_TIME,
+            mavlink.MAV_CMD_NAV_LOITER_TO_ALT):
+        # a hovering vehicle sits at the point for these, and climbs straight
+        # up for LOITER_TO_ALT.  It does fly LOITER_TURNS and DO_ORBIT as
+        # circles, so those are left alone
+        return None
+    radius = params[index]
+    if command == MAV_CMD_DO_ORBIT:
+        if radius is None or math.isnan(radius) or radius == 0:
+            radius = default_radius
+        if radius is None or math.isnan(radius) or radius == 0:
+            return None
+        return radius
+    if radius is None or math.isnan(radius):
+        radius = 0.0
+    if (command == mavlink.MAV_CMD_NAV_LOITER_TIME or abs(radius) <= 1):
+        # the vehicle's own radius.  ArduPilot has nowhere to keep a radius
+        # for LOITER_TIME -- the loiter time takes all of the storage -- so
+        # it keeps only a bit saying the item asked for counter-clockwise,
+        # and hands that back as -1 (or +1 when it did not); whatever radius
+        # the item was uploaded with, ArduPlane's update_loiter(0) flies
+        # WP_LOITER_RAD.  It takes any radius of a metre or less the same
+        # way, and flies counter-clockwise if the item asked for it, and
+        # otherwise the way WP_LOITER_RAD's sign says
+        if default_radius is None or math.isnan(default_radius):
+            return None
+        size = abs(default_radius)
+        if size <= 1:
+            # ArduPlane's LOITER_RADIUS_DEFAULT
+            size = 60.0
+        if radius < 0 or default_radius < 0:
+            return -size
+        return size
+    return radius
+
+
+def mission_circle_turns(command, params):
+    """return the number of turns a circling mission item flies, or None if
+    it circles indefinitely or the count is not part of the item"""
+    from pymavlink import mavutil
+    mavlink = mavutil.mavlink
+    if command == mavlink.MAV_CMD_NAV_LOITER_TURNS:
+        turns = params[0]
+    elif command == MAV_CMD_DO_ORBIT:
+        # DO_ORBIT counts in radians rather than turns
+        turns = params[3] / (2 * pi)
+    else:
+        return None
+    if turns is None or math.isnan(turns) or turns <= 0:
+        return None
+    return turns
+
+
+def mission_crosstracks_from_centre(command, params):
+    """whether the leg out of a circling mission item is flown against a
+    track starting at the item's own location rather than at the point the
+    vehicle leaves the circle.
+
+    ArduPlane crosstracks from the centre unless param4 asks for the exit
+    location instead, and only the loiter items which are flown until
+    something lets the vehicle go carry that choice there.  LOITER_UNLIM
+    never leaves, and DO_ORBIT counts its turns in param4, so neither is
+    asked
+    """
+    from pymavlink import mavutil
+    mavlink = mavutil.mavlink
+    if command not in (mavlink.MAV_CMD_NAV_LOITER_TURNS,
+                       mavlink.MAV_CMD_NAV_LOITER_TIME,
+                       mavlink.MAV_CMD_NAV_LOITER_TO_ALT):
+        return False
+    xtrack = params[3]
+    if xtrack is None or math.isnan(xtrack):
+        return True
+    return not xtrack > 0
+
+
+def log_params(mlog):
+    """the parameters a log carries.  A telemetry log's params are only the
+    PARAM_VALUEs the autopilot sent.  Where MAVProxy fetched them over FTP
+    it logged them itself, as PARAM_VALUEs from MAV_COMP_ID_MISSIONPLANNER so
+    they can be told apart, and those are left out: a log from a vehicle
+    whose parameters were fetched that way offers only the few the autopilot
+    sent as they changed.  Take both, the autopilot's own over the fetched
+    ones"""
+    params = getattr(mlog, 'params', None)
+    param_state = getattr(mlog, 'param_state', None)
+    if not param_state:
+        return params
+    from pymavlink import mavutil
+    sysid = getattr(mlog, 'sysid', 0)
+    if not sysid:
+        # the log picks the vehicle whose params it offers from its first
+        # heartbeat, and a log with none in it never picks one.  Take the
+        # vehicle the parameters came from, so long as only one did
+        systems = set(k[0] for (k, state) in param_state.items()
+                      if k[0] != 0 and state.params)
+        if len(systems) != 1:
+            return params
+        sysid = systems.pop()
+        own = param_state.get((sysid, 1))
+        params = own.params if own is not None else {}
+    fetched = param_state.get((sysid,
+                               mavutil.mavlink.MAV_COMP_ID_MISSIONPLANNER))
+    if fetched is None or not fetched.params:
+        return params
+    ret = dict(fetched.params)
+    ret.update(params or {})
+    return ret
+
+
+def param_value(params, name):
+    """look one parameter up in params, which may be a mapping (a live
+    vehicle's mav_param, or a log's params) or a callable taking a name.
+    Returns None when the parameter is not there"""
+    if params is None:
+        return None
+    try:
+        if callable(params):
+            return params(name)
+        return params.get(name)
+    except Exception:
+        return None
+
+
+def _first_param(params, candidates):
+    """the value of the first parameter present, scaled by the factor beside
+    it. candidates is a sequence of (name, scale)"""
+    for (name, scale) in candidates:
+        value = param_value(params, name)
+        if value is None:
+            continue
+        value = float(value) * scale
+        if value != 0 and not math.isnan(value):
+            return value
+    return None
+
+
+# climb and descent rates as the vehicle is configured to fly them. The
+# firmware has moved these to metres per second over time, so the older
+# centimetre forms are listed after the ones that replaced them
+CLIMB_RATE_PARAMS = [
+    ('TECS_CLMB_MAX', 1.0),         # forward-flight
+    ('WP_SPD_UP', 1.0),
+    ('PILOT_SPD_UP', 1.0),
+    ('WPNAV_SPEED_UP', 0.01),
+    ('PILOT_SPEED_UP', 0.01),
+]
+DESCENT_RATE_PARAMS = [
+    # SINK_MIN is the rate a plane actually cruises down at; SINK_MAX is the
+    # limit it will not exceed, which it does not fly at in a loiter
+    ('TECS_SINK_MIN', 1.0),         # forward-flight
+    ('TECS_SINK_MAX', 1.0),
+    ('WP_SPD_DN', 1.0),
+    ('PILOT_SPD_DN', 1.0),
+    ('WPNAV_SPEED_DN', 0.01),
+    ('PILOT_SPEED_DN', 0.01),
+]
+CRUISE_SPEED_PARAMS = [
+    ('AIRSPEED_CRUISE', 1.0),       # forward-flight
+    ('TRIM_ARSPD_CM', 0.01),
+    ('WP_SPD', 1.0),
+    ('WPNAV_SPEED', 0.01),
+]
+
+
+def vehicle_climb_rate(params, descending=False):
+    """the vertical speed in m/s the vehicle is configured to climb (or
+    descend) at, or None if none of the parameters we know are present"""
+    if descending:
+        return _first_param(params, DESCENT_RATE_PARAMS)
+    return _first_param(params, CLIMB_RATE_PARAMS)
+
+
+def vehicle_cruise_speed(params):
+    """the speed in m/s the vehicle is configured to cruise at, or None"""
+    return _first_param(params, CRUISE_SPEED_PARAMS)
+
+
+def vehicle_track_convergence(params):
+    """the distance over which the vehicle pulls itself back onto the track
+    it is supposed to be following, or None if we cannot tell.
+
+    This is the L1 controller's own distance, which is what decides how
+    sharply it converges: 1/pi times the damping, the period and the speed
+    """
+    period = param_value(params, 'NAVL1_PERIOD')
+    damping = param_value(params, 'NAVL1_DAMPING')
+    speed = vehicle_cruise_speed(params)
+    if period is None or speed is None:
+        return None
+    if damping is None:
+        damping = 0.75
+    distance = 0.3183099 * float(damping) * float(period) * speed
+    if distance <= 0 or math.isnan(distance):
+        return None
+    return distance
+
+
+def loiter_to_alt_turns(radius, alt_change, params, approach_distance=None,
+                        default_turns=1.0):
+    """how many turns a forward-moving vehicle spends circling to reach the
+    altitude a NAV_LOITER_TO_ALT item asks for.
+
+    The vehicle is already climbing on its way to the loiter point, so only
+    what is left when it arrives gets flown off on the circle.  Given the
+    distance it covers approaching, the time to make the whole altitude
+    change less the time spent approaching leaves the time spent circling,
+    and a turn takes 2*pi*radius/speed seconds.
+
+    With no configured rate or speed to go on there is nothing to compute,
+    and default_turns is the answer -- one turn draws the loiter without
+    pretending to know how long it takes.
+    """
+    if not radius or alt_change is None:
+        return default_turns
+    rate = vehicle_climb_rate(params, descending=(alt_change < 0))
+    speed = vehicle_cruise_speed(params)
+    if rate is None or speed is None or rate <= 0 or speed <= 0:
+        return default_turns
+    seconds = abs(alt_change) / abs(rate)
+    if approach_distance:
+        seconds -= abs(approach_distance) / speed
+    seconds_per_turn = 2 * pi * abs(radius) / speed
+    turns = seconds / seconds_per_turn
+    # it flies at least part of a circle however little is left to do, and an
+    # unbounded spiral is not a useful drawing either
+    return constrain(turns, 0.25, 20.0)
 
 
 def mkdir_p(dir):
@@ -378,7 +818,8 @@ def decode_devid(devid, pname):
         3: "UAVCAN",
         4: "SITL",
         5: "MSP",
-        6: "EAHRS"
+        6: "SERIAL",
+        7: "WSPI",
         }
 
     compass_types = {
@@ -389,7 +830,7 @@ def decode_devid(devid, pname):
         0x05 : "BMM150 ",
         0x06 : "LSM9DS1",
         0x08 : "LIS3MDL",
-        0x09 : "AK09916",
+        0x09 : "AK0991x",
         0x0A : "IST8310",
         0x0B : "ICM20948",
         0x0C : "MMC3416",
@@ -399,6 +840,13 @@ def decode_devid(devid, pname):
         0x10 : "IST8308",
         0x11 : "RM3100",
         0x12 : "RM3100_2",
+        0x13 : "MMC5883",
+        0x14 : "AK09918",
+        0x15 : "AK09915",
+        0x16 : "QMC5883P",
+        0x17 : "BMM350",
+        0x18 : "IIS2MDC",
+        0x19 : "LIS2MSL",
         }
 
     imu_types = {
@@ -430,6 +878,17 @@ def decode_devid(devid, pname):
         0x33 : "INS_ICM40609",
         0x34 : "INS_ICM42688",
         0x35 : "INS_ICM42605",
+        0x36 : "INS_ICM40605",
+        0x37 : "INS_IIM42652",
+        0x38 : "INS_BMI270",
+        0x39 : "INS_BMI085",
+        0x3A : "INS_ICM42670",
+        0x3B : "INS_ICM45686",
+        0x3C : "INS_SCHA63T",
+        0x3D : "INS_IIM42653",
+        0x3E : "INS_LSM6DSV",
+        0x3F : "INS_ASM330",
+        0x40 : "INS_ADIS16607",
         }
 
     baro_types = {
@@ -446,6 +905,17 @@ def decode_devid(devid, pname):
         0x0B : "BARO_MS5611",
         0x0C : "BARO_SPL06",
         0x0D : "BARO_UAVCAN",
+        0x0E : "BARO_MSP",
+        0x0F : "BARO_ICP101XX",
+        0x10 : "BARO_ICP201XX",
+        0x11 : "BARO_MS5607",
+        0x12 : "BARO_MS5837_30BA",
+        0x13 : "BARO_MS5637",
+        0x14 : "BARO_BMP390",
+        0x15 : "BARO_BMP581",
+        0x16 : "BARO_SPA06",
+        0x17 : "BARO_AUAV",
+        0x18 : "BARO_MS5837_02BA",
     }
 
     airspeed_types = {
@@ -459,8 +929,9 @@ def decode_devid(devid, pname):
         0x08 : "AIRSPEED_ANALOG",
         0x09 : "AIRSPEED_NMEA",
         0x0A : "AIRSPEED_ASP5033",
+        0x0B : "AIRSPEED_AUAV",
     }
-        
+
     decoded_devname = ""
 
     if pname.startswith("COMPASS"):
@@ -482,9 +953,132 @@ def decode_devid(devid, pname):
 
     if pname.startswith("ARSP"):
         decoded_devname = airspeed_types.get(devtype, "UNKNOWN")
-        
+
+    if pname.startswith("MAV"):
+        # see AP_SerialManager::UARTState::get_device_id; devtype is
+        # the port kind, address is the port index within that kind
+        # and bus distinguishes CAN driver 1 from CAN driver 2
+        if devtype == 1:
+            decoded_devname = "SERIAL" + str(address)
+        elif devtype == 2:
+            decoded_devname = "NET_P" + str(address + 1)
+        elif devtype == 3:
+            decoded_devname = "CAN_D%u_UC_S%u" % (bus + 1, address + 1)
+        elif devtype == 4:
+            decoded_devname = "SCR_SDEV" + str(address + 1)
+        else:
+            decoded_devname = "UNKNOWN"
+
     print("%s: bus_type:%s(%u)  bus:%u address:%u(0x%x) devtype:%u(0x%x) %s (%u)" % (
         pname,
         bustypes.get(bus_type,"UNKNOWN"), bus_type,
         bus, address, address, devtype, devtype, decoded_devname,
         devid))
+
+
+def decode_flight_sw_version(flight_sw_version):
+    '''decode 32 bit flight_sw_version mavlink parameter - corresponds to encoding in ardupilot GCS_MAVLINK::send_autopilot_version'''
+    fw_type_id = (flight_sw_version >>  0) % 256
+    patch      = (flight_sw_version >>  8) % 256
+    minor      = (flight_sw_version >> 16) % 256
+    major      = (flight_sw_version >> 24) % 256
+    if (fw_type_id==0):
+        fw_type="dev"
+    elif (fw_type_id==64):
+        fw_type="alpha"
+    elif (fw_type_id==128):
+        fw_type="beta"
+    elif (fw_type_id==192):
+        fw_type="rc"
+    elif (fw_type_id==255):
+        fw_type="official"
+    else:
+        fw_type="undefined"
+    return major,minor,patch,fw_type
+
+class mp_position(object):
+    '''a position object from a local provider such as a NMEA GPS module'''
+    def __init__(self):
+        self.timestamp = None
+        self.latitude = None
+        self.longitude = None
+        self.altitude = None
+        self.ground_course = None
+        self.ground_speed = None
+        self.num_sats = None
+
+    def __str__(self):
+        return "%u satellites age=%.1fs lat=%.9f lon=%.9f alt=%.3f m spd=%.2f m/s course=%.2f deg" % (
+            self.num_sats,
+            time.time() - self.timestamp,
+            self.latitude, self.longitude, self.altitude,
+            self.ground_speed, self.ground_course)
+
+def get_gps_time(tnow):
+    '''return gps_week and gps_week_ms for current unix time in seconds'''
+    leapseconds = 18
+    SEC_PER_WEEK = 7 * 86400
+    UNIX_TO_GPS_EPOCH = 315964800
+
+    epoch = UNIX_TO_GPS_EPOCH - leapseconds
+    epoch_seconds = int(tnow - epoch)
+    week = int(epoch_seconds) // SEC_PER_WEEK
+    t_ms = int(tnow * 1000) % 1000
+    week_ms = (epoch_seconds % SEC_PER_WEEK) * 1000 + ((t_ms//200) * 200)
+    return week, week_ms
+
+    
+
+_vehicle_type_names = None
+
+
+def vehicle_type_name(mav_type):
+    '''vehicle name for a MAV_TYPE, as used to pick a map icon, or None if we
+    have no icon for that type'''
+    global _vehicle_type_names
+    if _vehicle_type_names is None:
+        from pymavlink import mavutil
+        mavlink = mavutil.mavlink
+        groups = {
+            'plane': plane_mav_types(),
+            'rover': [mavlink.MAV_TYPE_GROUND_ROVER],
+            'sub': [mavlink.MAV_TYPE_SUBMARINE],
+            'boat': [mavlink.MAV_TYPE_SURFACE_BOAT],
+            'copter': [mavlink.MAV_TYPE_QUADROTOR,
+                       mavlink.MAV_TYPE_HEXAROTOR,
+                       mavlink.MAV_TYPE_OCTOROTOR,
+                       mavlink.MAV_TYPE_TRICOPTER,
+                       mavlink.MAV_TYPE_DODECAROTOR,
+                       mavlink.MAV_TYPE_DECAROTOR],
+            'singlecopter': [mavlink.MAV_TYPE_COAXIAL],
+            'heli': [mavlink.MAV_TYPE_HELICOPTER],
+            'antenna': [mavlink.MAV_TYPE_ANTENNA_TRACKER],
+            'blimp': [mavlink.MAV_TYPE_AIRSHIP],
+        }
+        _vehicle_type_names = {t: name
+                               for name, types in groups.items()
+                               for t in types}
+    return _vehicle_type_names.get(mav_type)
+
+
+def natural_sort_key(s):
+    '''a sort key for natural sorting, where embedded integers are sorted separately'''
+    return [int(text) if text.isdigit() else text.lower()
+                for text in re.split('([0-9]+)', s)]
+
+def sorted_natural(lst):
+    '''sort using a 'natural' sort order'''
+    return sorted(lst, key=natural_sort_key)
+
+def import_cv2():
+    '''import cv2, explaining the usual cause of failure. A distro opencv is
+    built against one numpy major version, so pulling in a newer numpy (some
+    packages require numpy>=2) leaves cv2 unimportable'''
+    try:
+        import cv2
+        return cv2
+    except ImportError as ex:
+        raise ImportError(
+            "opencv (cv2) is not usable: %s. If numpy was upgraded then the "
+            "installed opencv may be built for the previous numpy; try "
+            "'pip install -U opencv-python'" % ex)

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 Checklist module
 Stephen Dade
@@ -12,14 +12,22 @@ from pymavlink import mavutil
 
 class ChecklistModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(ChecklistModule, self).__init__(mpstate, "checklist", "checklist module")
-        self.checklist = mp_checklist.CheckUI()
+        super().__init__(mpstate, "checklist", "checklist module")
+        checklist_file = None
+        if mpstate.aircraft_dir is not None:
+            path = os.path.join(mpstate.aircraft_dir, "checklist.txt")
+            if os.path.exists(path):
+                checklist_file = path
+        self.checklist = mp_checklist.CheckUI(checklist_file=checklist_file, logdir=self.logdir)
 
     def mavlink_packet(self, msg):
         '''handle an incoming mavlink packet'''
+        if self.checklist is None:
+            return
         if not isinstance(self.checklist, mp_checklist.CheckUI):
             return
         if not self.checklist.is_alive():
+            self.needs_unloading = True
             return
 
         type = msg.get_type()
@@ -107,6 +115,11 @@ class ChecklistModule(mp_module.MPModule):
             else:
                 self.checklist.set_check("IMU Check", 0)
 
+    def unload(self):
+        '''unload module'''
+        if self.checklist is not None:
+            self.checklist.close()
+            self.checklist = None
 
 def init(mpstate):
     '''initialise module'''

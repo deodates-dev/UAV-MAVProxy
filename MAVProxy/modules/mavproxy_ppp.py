@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 A PPP over MAVLink module
 Andrew Tridgell
@@ -11,7 +11,7 @@ from MAVProxy.modules.lib import mp_module
 
 class PPPModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(PPPModule, self).__init__(mpstate, "ppp", "PPP link")
+        super().__init__(mpstate, "ppp", "PPP link")
         self.command = "noauth nodefaultroute nodetach nodeflate nobsdcomp mtu 128".split()
         self.packet_count = 0
         self.byte_count = 0

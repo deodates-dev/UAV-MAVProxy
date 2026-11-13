@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
   MAVProxy default console
@@ -41,6 +41,10 @@ class SimpleConsole():
         return True
 
     def set_menu(self, menu, callback):
+        pass
+
+    def set_title(self, title):
+        '''set console title'''
         pass
 
 if __name__ == "__main__":

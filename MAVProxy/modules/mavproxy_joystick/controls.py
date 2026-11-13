@@ -16,12 +16,14 @@ class Control (object):
     '''Base class for all controls'''
     def __init__(self, joystick,
                  inlow=-1, inhigh=1,
-                 outlow=1000, outhigh=2000):
+                 outlow=1000, outhigh=2000,
+                 values=[]):
         self.joystick = joystick
         self.inlow = inlow
         self.inhigh = inhigh
         self.outlow = outlow
         self.outhigh = outhigh
+        self.values = values
 
 
 class Button (Control):
@@ -30,7 +32,7 @@ class Button (Control):
     the value is set to `outlow`.'''
 
     def __init__(self, joystick, id, **kwargs):
-        super(Button, self).__init__(joystick, **kwargs)
+        super().__init__(joystick, **kwargs)
         self.id = id
 
     @property
@@ -42,6 +44,44 @@ class Button (Control):
             return self.outlow
 
 
+class ToggleButton (Control):
+    '''A ToggleButton acts like a toggle or rotary switch.
+    Initially, the corresponding channel value is set to the first value in `values`;
+    when button `id` is pressed consecutively, the values are iterated on each press.
+    Iteration is looped by starting from the beginning when last value is reached.'''
+
+    def __init__(self, joystick, id, **kwargs):
+        super().__init__(joystick, **kwargs)
+        self.id = id
+        # index of value to set next
+        self._current_value_index = 0
+        # current value
+        self._current_value = self.values[self._current_value_index]
+        # last button state
+        self._last_state = False
+
+    @property
+    def value(self):
+        state = self.joystick.get_button(self.id)
+        # button is pressed and last call it was not?
+        if state and state != self._last_state:
+            # choose new value for next press
+            if self._current_value_index >= len(self.values)-1:
+                # start over with first value
+                self._current_value_index = 0
+            else:
+                # choose next value
+                self._current_value_index += 1
+
+            # get next value from "values" list
+            self._current_value = self.values[self._current_value_index]
+
+        # save new button state
+        self._last_state = state
+
+        return self._current_value
+
+
 class MultiButton (Control):
     '''A MultiButton maps multiple buttons to the same channel like a
     multiple-position switch.  When a button is pressed, the channel
@@ -49,7 +89,7 @@ class MultiButton (Control):
     changes is made to the channel.'''
 
     def __init__(self, joystick, buttons, **kwargs):
-        super(MultiButton, self).__init__(joystick, **kwargs)
+        super().__init__(joystick, **kwargs)
         self.buttons = buttons
         self._value = buttons[0]['value']
 
@@ -69,7 +109,7 @@ class Axis (Control):
     `True` in order to reverse the direction of the input.'''
 
     def __init__(self, joystick, id, invert=False, **kwargs):
-        super(Axis, self).__init__(joystick, **kwargs)
+        super().__init__(joystick, **kwargs)
         self.id = id
         self.invert = invert
 
@@ -79,7 +119,7 @@ class Axis (Control):
         if self.invert:
             val = -val
 
-        return scale(val, outlow=self.outlow, outhigh=self.outhigh)
+        return scale(val, inlow=self.inlow, inhigh=self.inhigh, outlow=self.outlow, outhigh=self.outhigh)
 
 
 class Hat (Control):
@@ -89,7 +129,7 @@ class Hat (Control):
     to `outputhigh`.  No change is made when the axis returns to 0.'''
 
     def __init__(self, joystick, id, axis, **kwargs):
-        super(Hat, self).__init__(joystick, **kwargs)
+        super().__init__(joystick, **kwargs)
         self.id = id
         self.axis = axis
         self._value = self.outlow
@@ -127,6 +167,13 @@ class Joystick (object):
                           if k in ['outlow', 'outhigh']}
 
                 handler = Button(self.joystick, control['id'], **kwargs)
+
+            elif control['type'] == 'toggle':
+                kwargs = {k: control[k]
+                          for k in control.keys()
+                          if k in ['values']}
+
+                handler = ToggleButton(self.joystick, control['id'], **kwargs)
 
             elif control['type'] == 'axis':
                 kwargs = {k: control[k]

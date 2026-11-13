@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 '''
 Server Module
@@ -124,7 +124,7 @@ class RestServer():
 class ServerModule(mp_module.MPModule):
     ''' Server Module '''
     def __init__(self, mpstate):
-        super(ServerModule, self).__init__(mpstate, "restserver", "restserver module")
+        super().__init__(mpstate, "restserver", "restserver module")
         # Configure server
         self.rest_server = RestServer()
 

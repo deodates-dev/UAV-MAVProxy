@@ -13,7 +13,7 @@ import time
 class HorizonModule(mp_module.MPModule):
     def __init__(self, mpstate):
         # Define module load/unload reference and window title
-        super(HorizonModule, self).__init__(mpstate, "horizon", "Horizon Indicator", public=True)
+        super().__init__(mpstate, "horizon", "Horizon Indicator", public=True)
         self.mpstate.horizonIndicator = wxhorizon.HorizonIndicator(title='Horizon Indicator')
         self.mode = ''
         self.armed = ''
@@ -84,7 +84,7 @@ class HorizonModule(mp_module.MPModule):
         elif msgType == 'SYS_STATUS':
             # Mode and Arm State
             self.msgList.append(BatteryInfo(msg))
-        elif msgType in ['WAYPOINT_CURRENT', 'MISSION_CURRENT']:
+        elif msgType in ['MISSION_CURRENT']:
             # Waypoints
             self.currentWP = msg.seq
             self.finalWP = self.module('wp').wploader.count()

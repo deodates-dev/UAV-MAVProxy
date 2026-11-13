@@ -9,6 +9,7 @@ import time
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import mp_settings
 from MAVProxy.modules.lib import LowPassFilter2p
+from MAVProxy.modules.lib import mp_util
 from pymavlink.rotmat import Vector3
 from pymavlink.quaternion import Quaternion
 from pymavlink import mavutil
@@ -17,23 +18,10 @@ from pymavlink import mavextra
 from pyvicon import pyvicon
 
 
-def get_gps_time(tnow):
-    """return gps_week and gps_week_ms for current time"""
-    leapseconds = 18
-    SEC_PER_WEEK = 7 * 86400
-
-    epoch = 86400*(10*365 + (1980-1969)/4 + 1 + 6 - 2) - leapseconds
-    epoch_seconds = int(tnow - epoch)
-    week = int(epoch_seconds) // SEC_PER_WEEK
-    t_ms = int(tnow * 1000) % 1000
-    week_ms = (epoch_seconds % SEC_PER_WEEK) * 1000 + ((t_ms//200) * 200)
-    return week, week_ms
-
-
 class ViconModule(mp_module.MPModule):
 
     def __init__(self, mpstate):
-        super(ViconModule, self).__init__(mpstate, "vicon", "vicon", public=False)
+        super().__init__(mpstate, "vicon", "vicon", public=False)
         self.console.set_status('VPos', 'VPos -- -- --', row=5)
         self.console.set_status('VAtt', 'VAtt -- -- --', row=5)
         self.vicon_settings = mp_settings.MPSettings(
@@ -210,7 +198,7 @@ class ViconModule(mp_module.MPModule):
                                                self.vicon_settings.origin_lon,
                                                pos_ned.y, pos_ned.x)
         gps_alt = self.vicon_settings.origin_alt - pos_ned.z
-        gps_week, gps_week_ms = get_gps_time(time)
+        gps_week, gps_week_ms = mp_util.get_gps_time(time)
         if self.vicon_settings.gps_nsats >= 6:
             fix_type = 3
         else:

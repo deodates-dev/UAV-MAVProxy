@@ -9,12 +9,16 @@ class GraphFrame(wx.Frame):
 
     def __init__(self, state):
         wx.Frame.__init__(self, None, -1, state.title)
-        self.SetIcon(icon.SimpleIcon().get_ico())
+        try:
+            self.SetIcon(icon.SimpleIcon().get_ico())
+        except Exception:
+            pass
         self.state = state
         self.data = []
         for i in range(len(state.fields)):
             self.data.append([])
         self.paused = False
+        self.clear_data = False
 
         self.create_main_panel()
 
@@ -22,7 +26,7 @@ class GraphFrame(wx.Frame):
 
         self.redraw_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self.on_redraw_timer, self.redraw_timer)
-        self.redraw_timer.Start(1000*self.state.tickresolution)
+        self.redraw_timer.Start(int(1000*self.state.tickresolution))
 
         self.last_yrange = (None, None)
 
@@ -46,10 +50,18 @@ class GraphFrame(wx.Frame):
         self.Bind(wx.EVT_BUTTON, self.on_pause_button, self.pause_button)
         self.Bind(wx.EVT_UPDATE_UI, self.on_update_pause_button, self.pause_button)
 
+        self.clear_button = wx.Button(self.panel, -1, "Clear")
+        self.Bind(wx.EVT_BUTTON, self.on_clear_button, self.clear_button)
+        self.Bind(wx.EVT_UPDATE_UI, self.on_update_clear_button, self.clear_button)
+
+        did_one = False
         self.hbox1 = wx.BoxSizer(wx.HORIZONTAL)
-        self.hbox1.Add(self.close_button, border=5, flag=wx.ALL | wx.ALIGN_CENTER_VERTICAL)
-        self.hbox1.AddSpacer(1)
-        self.hbox1.Add(self.pause_button, border=5, flag=wx.ALL | wx.ALIGN_CENTER_VERTICAL)
+        for button in self.close_button, self.pause_button, self.clear_button:
+            if did_one:
+                self.hbox1.Add(self.close_button, border=5, flag=wx.ALL | wx.ALIGN_CENTER_VERTICAL)
+                self.hbox1.AddSpacer(1)
+                did_one = True
+            self.hbox1.Add(button, border=5, flag=wx.ALL | wx.ALIGN_CENTER_VERTICAL)
 
         self.vbox = wx.BoxSizer(wx.VERTICAL)
         self.vbox.Add(self.canvas, 1, flag=wx.LEFT | wx.TOP | wx.GROW)
@@ -81,12 +93,19 @@ class GraphFrame(wx.Frame):
             max_y = min_y = 0
         else:
             max_y = min_y = self.data[0][0]
+        num_labels = 0 if not self.state.labels else len(self.state.labels)
+        labels = []
         for i in range(len(self.data)):
+            if i < num_labels and self.state.labels[i] is not None:
+                label = self.state.labels[i]
+            else:
+                label = self.state.fields[i]
+            labels.append(label)
             p = self.axes.plot(
                 self.data[i],
                 linewidth=1,
-                color=self.state.colors[i],
-                label=self.state.fields[i],
+                color=self.state.colors[i%len(self.state.colors)],
+                label=label
                 )[0]
             self.plot_data.append(p)
             if len(self.data[i]) != 0:
@@ -98,7 +117,7 @@ class GraphFrame(wx.Frame):
         self.axes.set_xbound(lower=self.xdata[0], upper=0)
         if min_y == max_y:
             self.axes.set_ybound(min_y, max_y+0.1)
-        self.axes.legend(self.state.fields, loc='upper left', bbox_to_anchor=(0, 1.1))
+        self.axes.legend(labels, loc='upper left', bbox_to_anchor=(0, 1.1))
 
     def draw_plot(self):
         """ Redraws the plot
@@ -124,6 +143,10 @@ class GraphFrame(wx.Frame):
         if (ymin, ymax) != self.last_yrange:
             self.last_yrange = (ymin, ymax)
 
+            if ymax == ymin:
+                ymin = ymin-0.5
+                ymax = ymin+1
+
             self.axes.set_ybound(lower=ymin, upper=ymax)
             #self.axes.ticklabel_format(useOffset=False, style='plain')
             self.axes.grid(True, color='gray')
@@ -148,6 +171,12 @@ class GraphFrame(wx.Frame):
         label = "Resume" if self.paused else "Pause"
         self.pause_button.SetLabel(label)
 
+    def on_update_clear_button(self, event):
+        pass
+
+    def on_clear_button(self, event):
+        self.clear_data = True
+
     def on_close_button(self, event):
         self.redraw_timer.Stop()
         self.Destroy()
@@ -168,6 +197,14 @@ class GraphFrame(wx.Frame):
             state.values = state.child_pipe.recv()
         if self.paused:
             return
+
+        if self.clear_data:
+            self.clear_data = False
+            for i in range(len(self.plot_data)):
+                if state.values[i] is not None:
+                    while len(self.data[i]):
+                        self.data[i].pop(0)
+
         for i in range(len(self.plot_data)):
             if (type(state.values[i]) == list):
                 print("ERROR: Cannot plot array of length %d. Use 'graph %s[index]' instead"%(len(state.values[i]), state.fields[i]))

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 movinghome module
 André Kjellstrup, Norce
@@ -28,7 +28,7 @@ from MAVProxy.modules.lib import mp_settings
 class movinghome(mp_module.MPModule):
     def __init__(self, mpstate):
         #Initialise module
-        super(movinghome, self).__init__(mpstate, "movinghome", "")
+        super().__init__(mpstate, "movinghome", "")
         #latest GCS coordinates
         self.lat = 0
         self.lon = 0

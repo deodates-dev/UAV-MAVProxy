@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''
 Proximity sensor module
@@ -15,6 +15,7 @@ import sys
 from pymavlink import mavutil
 import errno
 import time
+import math
 
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import mp_util
@@ -25,7 +26,7 @@ from MAVProxy.modules.mavproxy_map import mp_slipmap
 class proximity(mp_module.MPModule):
     def __init__(self, mpstate, multi_vehicle=True):
         """Initialise module"""
-        super(proximity, self).__init__(mpstate, "proximity", "")
+        super().__init__(mpstate, "proximity", "")
 
         self.proximity_settings = mp_settings.MPSettings(
             [ ('verbose', bool, False),

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import wx
 import wx.grid as gridlib
 import math
@@ -9,7 +9,19 @@ class GridCheckListEditor(gridlib.PyGridCellEditor):
     This is a custom CheckListBox editor for setting of Bitmasks
     """
     def __init__(self, choice, pvalcol, start):
-        self.choices = choice
+        # ensure the choices list has no gaps
+        bvalue = 0
+        self.choices = []
+        for c in choice:
+            bopt = c.split(":")
+            if len(bopt) != 2:
+                continue
+            bval = int(bopt[0])
+            while bvalue < bval:
+                self.choices.append("%u:INVALID" % bvalue)
+                bvalue += 1
+            self.choices.append(c)
+            bvalue += 1
         binary = bin(int(start))[2:]
         self.startValue = [(len(binary)-ones-1) for ones in range(len(binary)) if binary[ones] == '1']
         self.pvalcol = pvalcol
@@ -39,7 +51,7 @@ class GridCheckListEditor(gridlib.PyGridCellEditor):
                                wx.SIZE_ALLOW_MINUS_ONE)
 
     def Show(self, show, attr):
-        super(GridCheckListEditor, self).Show(show, attr)
+        super().Show(show, attr)
 
     def BeginEdit(self, row, col, grid):
         self._tc.SetChecked(self.startValue)
@@ -72,7 +84,7 @@ class GridCheckListEditor(gridlib.PyGridCellEditor):
         evt.Skip()
 
     def Destroy(self):
-        super(GridCheckListEditor, self).Destroy()
+        super().Destroy()
 
     def Clone(self):
         return GridCheckListEditor(self.choices, self.pvalcol, self.startValue)
@@ -106,7 +118,7 @@ class GridDropListEditor(gridlib.PyGridCellEditor):
             self._tc.PushEventHandler(evtHandler)
 
     def Show(self, show, attr):
-        super(GridDropListEditor, self).Show(show, attr)
+        super().Show(show, attr)
 
     def SetSize(self, rect):
         self._tc.SetDimensions(rect.x, rect.y, rect.width+2, 30,
@@ -134,7 +146,7 @@ class GridDropListEditor(gridlib.PyGridCellEditor):
         evt.Skip()
 
     def Destroy(self):
-        super(GridDropListEditor, self).Destroy()
+        super().Destroy()
 
     def Clone(self):
         return GridDropListEditor(self.choices, self.pvalcol, self.startValue)
@@ -172,7 +184,7 @@ class GridScrollEditor(gridlib.PyGridCellEditor):
             self._tc.PushEventHandler(evtHandler)
 
     def Show(self, show, attr):
-        super(GridScrollEditor, self).Show(show, attr)
+        super().Show(show, attr)
 
     def BeginEdit(self, row, col, grid):
         self._tc.SetValue(self.startValue)
@@ -196,7 +208,7 @@ class GridScrollEditor(gridlib.PyGridCellEditor):
         evt.Skip()
 
     def Destroy(self):
-        super(GridScrollEditor, self).Destroy()
+        super().Destroy()
 
     def Clone(self):
         return GridScrollEditor(self.Range, self.pvalcol, self.startValue)

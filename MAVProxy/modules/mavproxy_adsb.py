@@ -8,41 +8,78 @@ from math import *
 
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import mp_settings
+from MAVProxy.modules.lib import mp_util
 from pymavlink import mavutil
+from PIL import ImageColor
 
 obc_icons = {
+     99 : 'flag.png',
     100 : 'greenplane.png',
-    101 : 'greenplane.png',
+    101 : 'bluecopter.png',
     102 : 'cloud.png',
     103 : 'migbird.png',
     104 : 'hawk.png'
 }
 
 obc_radius = {
-    100 : 300,
+     99 : 25,
+    100 : 609.6, # F3442M-23 standard boundary for "Well Clear" of aircraft = 2000ft
     101 : 300,
     102 : 173,
     103 : 100,
     104 : 200
 }
-    
-def get_threat_radius(m):
 
-    if m.emitter_type == 255:
+obc_height = {
+     14 : 25,
+     99 : 25,
+    100 : 76,   # F3442M-23 standard vertical boundary for "Well Clear" of aircraft = 250ft
+    101 : 100,
+    102 : 173,
+    103 : 100,
+    104 : 200
+}
+
+def get_threat_radius(emitter_type, squawk):
+
+    if emitter_type == 255:
         ''' objectAvoidance Database item, squawk contains radius in cm'''
-        return m.squawk * 0.01
-    '''get threat radius for an OBC item'''
-    return obc_radius.get(m.emitter_type,0)
+        return squawk * 0.01
+    if emitter_type < 14:
+        ''' adsb emitters for all crude vehicles are < 14 (UAV) '''
+        return 609.6
+    '''get threat height for an OBC item'''
+    return obc_radius.get(emitter_type,609.6)
 
+def get_threat_height(emitter_type):
+    if emitter_type < 14:
+        ''' adsb emitters for all crude vehicles are < 14 (UAV) '''
+        return 76
+    return obc_height.get(emitter_type)
 
-def get_threat_icon(m, default_icon):
+def get_threat_icon(emitter_type, default_icon):
 
-    if m.emitter_type == 255:
+    if emitter_type == 255:
         ''' objectAvoidance Database item, do not draw an icon'''
-        return None
+        return obc_icons.get(99, default_icon)
     '''get threat radius for an OBC item, else the true ADSB icon'''
-    return obc_icons.get(m.emitter_type, default_icon)
+    return obc_icons.get(emitter_type, default_icon)
 
+''' internally we use these special (invalid according to the ADS-B spec) emitter types for test obstacles '''
+def get_internal_emitter(trkn):
+
+    if trkn >= 0xB00000 and  trkn < 0xB10000:
+        return 102        # weather
+    elif trkn >= 0xB10000 and trkn < 0xB20000:
+        return 103        # Migratory Bird
+    elif trkn >= 0xB20000 and  trkn < 0xB30000:
+        return 104        # Predatory Bird
+    elif trkn <= 0x003FFF:
+        return 101       # drone
+    elif trkn >= 0xA00000:
+        return 100       # aircraft
+    else:
+        return 99        # dummy it for now
 
 class ADSBVehicle(object):
     '''a generic ADS-B threat'''
@@ -68,7 +105,7 @@ class ADSBVehicle(object):
 class ADSBModule(mp_module.MPModule):
 
     def __init__(self, mpstate):
-        super(ADSBModule, self).__init__(mpstate, "adsb", "ADS-B data support", public = True)
+        super().__init__(mpstate, "adsb", "ADS-B data support", public = True)
         self.threat_vehicles = {}
         self.active_threat_ids = []  # holds all threat ids the vehicle is evading
 
@@ -80,13 +117,20 @@ class ADSBModule(mp_module.MPModule):
                                                      ("show_threat_radius", bool, False),
                                                      # threat_radius_clear = threat_radius*threat_radius_clear_multiplier
                                                      ("threat_radius_clear_multiplier", int, 2),
-                                                     ("show_threat_radius_clear", bool, False)])
+                                                     ("show_threat_radius_clear", bool, False),
+                                                     ("show_callsign", bool, True),
+                                                     ("traffic_warning", bool, False),
+                                                     ("alt_color1", str, "blue"),
+                                                     ("alt_color2", str, "red"),
+                                                     ("alt_color_alt_thresh", int, 300),
+                                                     ("alt_color_dist_thresh", int, 3000)])
         self.add_completion_function('(ADSBSETTING)',
                                      self.ADSB_settings.completion)
         
         self.threat_detection_timer = mavutil.periodic_event(2)
         self.threat_timeout_timer = mavutil.periodic_event(2)
         self.tnow = self.get_time()
+        self.last_traffic = self.tnow
 
     def cmd_ADSB(self, args):
         '''adsb command parser'''
@@ -187,47 +231,93 @@ class ADSBModule(mp_module.MPModule):
                 # called:
                 return
 
+    def add_vehicle(self, state):
+        '''handle an incoming vehicle packet'''
+        id = 'ADSB-' + str(state['ICAO_address'])
+        lat = state['lat']
+        lon = state['lon']
+        altitude_km = state['altitude']
+        callsign = state['callsign']
+        heading = state['heading']
+        # OBC test framework reserves specific ICAO bands for synthetic
+        # obstacles (drones/aircraft/birds/clouds) and maps them to
+        # internal emitter types via get_internal_emitter(); for real
+        # ADSB addresses (0x004000..0x9FFFFF) trust the supplied
+        # emitter_type so we don't render every live aircraft as the
+        # placeholder "flag" icon.
+        icao = state['ICAO_address']
+        if icao <= 0x003FFF or icao >= 0xA00000:
+            emitter_type = get_internal_emitter(icao)
+        else:
+            emitter_type = state.get('emitter_type', 0) or 0
+        squawk = state['squawk']
+
+        if id not in self.threat_vehicles.keys():  # check to see if the vehicle is in the dict
+            #print("NEW: ", state)
+            # if not then add it
+            self.threat_vehicles[id] = ADSBVehicle(id=id, state=state)
+            #print("NEW: ", state)
+            for mp in self.module_matching('map*'):
+                from MAVProxy.modules.lib import mp_menu
+                from MAVProxy.modules.mavproxy_map import mp_slipmap
+                self.threat_vehicles[id].menu_item = mp_menu.MPMenuItem(name=id, returnkey=None)
+
+                threat_radius = get_threat_radius(emitter_type, squawk)
+                selected_icon = get_threat_icon(emitter_type, self.threat_vehicles[id].icon)
+                    
+                if selected_icon is not None:
+                    #print("map add ", state)
+                    # draw the vehicle on the map
+                    popup = mp_menu.MPMenuSubMenu('ADSB', items=[self.threat_vehicles[id].menu_item])
+                    icon = mp.map.icon(selected_icon)
+                    mp.map.add_object(mp_slipmap.SlipIcon(id, (lat * 1e-7, lon * 1e-7),
+                                                        icon, layer=3, rotation=heading*0.01, follow=False,
+                                                        trail=mp_slipmap.SlipTrail(colour=(0, 255, 255)),
+                                                        popup_menu=popup))
+                if threat_radius > 0:
+                    mp.map.add_object(mp_slipmap.SlipCircle(id+":circle", 3,
+                                                        (lat * 1e-7, lon * 1e-7),
+                                                        threat_radius, (0, 255, 255), linewidth=1))
+        else:  # the vehicle is in the dict
+            # update the dict entry
+            self.threat_vehicles[id].update(state, self.get_time())
+
+        for mp in self.module_matching('map*'):
+            # update the map, labelling alt above/below our alt
+            GPI = self.master.messages.get("GLOBAL_POSITION_INT", None)
+            if GPI is None:
+                return
+            ref_alt = GPI.alt*0.001
+            lat_deg = lat * 1.0e-7
+            lon_deg = lon * 1.0e-7
+            our_lat_deg = GPI.lat*1.0e-7
+            our_lon_deg = GPI.lon*1.0e-7
+
+            dist = mp_util.gps_distance(our_lat_deg, our_lon_deg, lat_deg, lon_deg)
+            alt_amsl = altitude_km * 0.001
+            color = ImageColor.getrgb(self.ADSB_settings.alt_color1)
+            label = ""
+            if self.ADSB_settings.show_callsign and (emitter_type < 14 or emitter_type == 100 or emitter_type == 101):
+                label = "[%s] " % callsign.rstrip()
+            if alt_amsl > 0:
+                alt = int(alt_amsl - ref_alt)
+                label += self.height_string(alt)
+                label += " (AMSL: %s) " % self.height_string(alt_amsl)
+                if abs(dist) < get_threat_radius(emitter_type, squawk) and abs(alt) < get_threat_height(emitter_type):
+                    tnow = self.get_time()
+                    if self.ADSB_settings.traffic_warning and tnow - self.last_traffic > 5:
+                        self.last_traffic = tnow
+                        self.say("traffic")
+                    color = ImageColor.getrgb(self.ADSB_settings.alt_color2)
+
+            mp.map.set_position(id, (lat_deg, lon_deg), rotation=heading*0.01, label=label, colour=color)
+            mp.map.set_position(id+":circle", (lat_deg, lon_deg))
+
     def mavlink_packet(self, m):
         '''handle an incoming mavlink packet'''
         if m.get_type() == "ADSB_VEHICLE":
-            id = 'ADSB-' + str(m.ICAO_address)
-            if id not in self.threat_vehicles.keys():  # check to see if the vehicle is in the dict
-                # if not then add it
-                self.threat_vehicles[id] = ADSBVehicle(id=id, state=m.to_dict())
-                for mp in self.module_matching('map*'):
-                    from MAVProxy.modules.lib import mp_menu
-                    from MAVProxy.modules.mavproxy_map import mp_slipmap
-                    self.threat_vehicles[id].menu_item = mp_menu.MPMenuItem(name=id, returnkey=None)
-
-                    threat_radius = get_threat_radius(m)
-                    selected_icon = get_threat_icon(m, self.threat_vehicles[id].icon)
-                    
-                    if selected_icon is not None:
-                        # draw the vehicle on the map
-                        popup = mp_menu.MPMenuSubMenu('ADSB', items=[self.threat_vehicles[id].menu_item])
-                        icon = mp.map.icon(selected_icon)
-                        mp.map.add_object(mp_slipmap.SlipIcon(id, (m.lat * 1e-7, m.lon * 1e-7),
-                                                    icon, layer=3, rotation=m.heading*0.01, follow=False,
-                                                    trail=mp_slipmap.SlipTrail(colour=(0, 255, 255)),
-                                                    popup_menu=popup))
-                    if threat_radius > 0:
-                        mp.map.add_object(mp_slipmap.SlipCircle(id+":circle", 3,
-                                                    (m.lat * 1e-7, m.lon * 1e-7),
-                                                    threat_radius, (0, 255, 255), linewidth=1))
-            else:  # the vehicle is in the dict
-                # update the dict entry
-                self.threat_vehicles[id].update(m.to_dict(), self.get_time())
-                for mp in self.module_matching('map*'):
-                    # update the map
-                    ground_alt = mp.ElevationMap.GetElevation(m.lat*1e-7, m.lon*1e-7)
-                    alt_amsl = m.altitude * 0.001
-                    if alt_amsl > 0:
-                        alt = int(alt_amsl - ground_alt)
-                        label = str(alt) + "m"
-                    else:
-                        label = None
-                    mp.map.set_position(id, (m.lat * 1e-7, m.lon * 1e-7), rotation=m.heading*0.01, label=label, colour=(0,250,250))
-                    mp.map.set_position(id+":circle", (m.lat * 1e-7, m.lon * 1e-7))
+            state = m.to_dict()
+            self.add_vehicle(state)
 
     def idle_task(self):
         '''called on idle'''

@@ -13,7 +13,7 @@ from MAVProxy.modules.lib import mp_module
 
 class GraphModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(GraphModule, self).__init__(mpstate, "graph", "graph control")
+        super().__init__(mpstate, "graph", "graph control")
         self.timespan = 20
         self.tickresolution = 0.2
         self.graphs = []
@@ -100,6 +100,12 @@ class Graph():
         self.msg_types = set()
         self.state = state
 
+        for i in range(len(self.fields)):
+            # special handling for NAMED_VALUE_FLOAT
+            m = re.match("^NAMED_VALUE_FLOAT\[([A-Z0-9_]+)\]\.(.*)$", self.fields[i])
+            if m:
+                self.fields[i] = "NAMED_VALUE_FLOAT['%s'].%s" % (m.group(1), m.group(2))
+
         re_caps = re.compile('[A-Z_][A-Z0-9_]+')
         for f in self.fields:
             caps = set(re.findall(re_caps, f))
@@ -107,13 +113,25 @@ class Graph():
             self.field_types.append(caps)
         print("Adding graph: %s" % self.fields)
 
-        fields = [ self.pretty_print_fieldname(x) for x in fields ]
+        fields = [ self.pretty_print_fieldname(x) for x in self.fields ]
+        labels = []
+        for i in range(len(fields)):
+            f = fields[i]
+            f1 = f.find("<")
+            f2 = f.find(">")
+            if f1 > 0 and f2 > f1:
+                labels.append(f[f1+1:f2])
+                fields[i] = f[:f1]
+            else:
+                labels.append(None)
 
+        self.fields = fields[:]
         self.values = [None] * len(self.fields)
         self.livegraph = live_graph.LiveGraph(fields,
                                               timespan=state.timespan,
                                               tickresolution=state.tickresolution,
-                                              title=self.fields[0])
+                                              title=fields[0] if labels[0] is None else labels[0],
+                                              labels=labels)
 
     def pretty_print_fieldname(self, fieldname):
         if fieldname in self.state.legend:

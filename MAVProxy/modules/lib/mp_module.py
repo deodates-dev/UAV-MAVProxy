@@ -1,4 +1,7 @@
 import time
+from pymavlink import mavutil
+import traceback
+import sys
 
 class MPModule(object):
     '''
@@ -16,6 +19,7 @@ class MPModule(object):
         self.needs_unloading = False
         self.multi_instance = multi_instance
         self.multi_vehicle = multi_vehicle
+        self.named_float_seq = 0
 
         if description is None:
             self.description = name + " handling"
@@ -136,6 +140,16 @@ class MPModule(object):
     def get_mav_param(self, param_name, default=None):
         return self.mpstate.functions.get_mav_param(param_name, default)
 
+    def default_circle_radius(self):
+        '''the radius a circling mission item uses when it does not carry one
+        of its own.
+
+        This is the forward-flight loiter radius: vehicles without one (a
+        multicopter, say) sit at the point rather than circling it, so None
+        is the right answer for them and nothing should be drawn
+        '''
+        return self.get_mav_param('WP_LOITER_RAD')
+
     def param_set(self, name, value, retries=3):
         self.mpstate.functions.param_set(name, value, retries)
 
@@ -153,6 +167,97 @@ class MPModule(object):
     def add_completion_function(self, name, callback):
         self.mpstate.completion_functions[name] = callback
 
+    def parse_key_value_args(self, args, valid_keys, values):
+        '''split "key=value" arguments into the values dict.
+
+        valid_keys maps each accepted (lower-case) key to a callable used
+        to convert its value (e.g. int, float, str), so values ends up
+        holding correctly-typed entries.  Returns True on success, or
+        prints an error and returns False for an argument which is not in
+        key=value form, an unknown key, or a value which will not convert.
+        '''
+        for arg in args:
+            if '=' not in arg:
+                print("Argument '%s' is not in key=value form" % arg)
+                return False
+            (key, value) = arg.split('=', 1)
+            key = key.lower()
+            if key not in valid_keys:
+                print("Unknown argument '%s'" % key)
+                return False
+            try:
+                values[key] = valid_keys[key](value)
+            except ValueError:
+                print("Invalid value '%s' for argument '%s'" % (value, key))
+                return False
+        return True
+
+    def parse_key_value_spec(self, args, spec, values):
+        '''parse "key=value" arguments according to an argument spec.
+
+        spec is an ordered dict mapping each canonical key to a dict of
+        facets; the facets used here are:
+          type      callable used to convert the value (required)
+          synonyms  list of alternative spellings folded onto this key
+          required  if True, the key must be supplied
+        Converted, synonym-folded values are stored in the values dict.
+        Returns True on success, or prints an error and returns False.
+        See parse_key_value_args() and format_key_value_help().
+        '''
+        valid_keys = {}
+        for (key, facets) in spec.items():
+            valid_keys[key] = facets['type']
+            for synonym in facets.get('synonyms', []):
+                valid_keys[synonym] = facets['type']
+
+        if not self.parse_key_value_args(args, valid_keys, values):
+            return False
+
+        # fold each synonym onto its canonical key; an explicit canonical
+        # key wins over a synonym if both were supplied
+        for (key, facets) in spec.items():
+            for synonym in facets.get('synonyms', []):
+                if synonym in values:
+                    synonym_value = values.pop(synonym)
+                    if key not in values:
+                        values[key] = synonym_value
+
+        for (key, facets) in spec.items():
+            if facets.get('required') and key not in values:
+                print("%s is required" % key)
+                return False
+        return True
+
+    def format_key_value_help(self, spec):
+        '''return a list of aligned description lines for an argument spec.
+
+        Each line describes one key (with any synonyms) and its help text,
+        marking required keys.  See parse_key_value_spec().
+        '''
+        names = {}
+        for (key, facets) in spec.items():
+            names[key] = '/'.join([key] + facets.get('synonyms', []))
+        width = max(len(n) for n in names.values())
+        lines = []
+        for (key, facets) in spec.items():
+            text = facets.get('help', '')
+            if facets.get('required'):
+                text += ' (required)'
+            lines.append("  %-*s  %s" % (width, names[key], text))
+        return lines
+
+    def flyto_frame_units(self):
+        '''return a frame string and unit'''
+        return "%s %s" % (self.settings.height_unit, self.settings.flytoframe)
+
+    def flyto_frame(self):
+        '''return mavlink frame flyto frame setting'''
+        if self.settings.flytoframe == "AGL":
+            return mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT
+        if self.settings.flytoframe == "AMSL":
+            return mavutil.mavlink.MAV_FRAME_GLOBAL
+        return mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT
+
     def dist_string(self, val_meters):
         '''return a distance as a string'''
         if self.settings.dist_unit == 'nm':
@@ -167,6 +272,12 @@ class MPModule(object):
             return val_meters * 3.28084
         return val_meters
 
+    def height_convert_from_units(self, val):
+        '''convert a height from configured units'''
+        if self.settings.height_unit == 'feet':
+            return val / 3.28084
+        return val
+    
     def height_string(self, val_meters):
         '''return a height as a string'''
         if self.settings.height_unit == 'feet':
@@ -205,9 +316,38 @@ class MPModule(object):
             label = str(link.linknum+1)
         return label
 
-    def is_primary_vehicle(self, msg):
+    def message_is_from_primary_vehicle(self, msg):
         '''see if a msg is from our primary vehicle'''
         sysid = msg.get_srcSystem()
-        if self.target_system == 0 or self.target_system == sysid:
+        compid = msg.get_srcComponent()
+        if ((self.target_system == 0 or self.target_system == sysid) and
+           (self.target_component == 0 or self.target_component == compid)):
             return True
         return False
+
+    def send_named_float(self, name, value):
+        '''inject a NAMED_VALUE_FLOAT into the local master input, so it becomes available
+           for graphs, logging and status command'''
+
+        # use the ATTITUDE message for time stamp
+        att = self.master.messages.get('ATTITUDE',None)
+        if att is None:
+            return
+        msec = att.time_boot_ms
+        ename = name.encode('ASCII')
+        if len(ename) < 10:
+            ename += bytes([0] * (10-len(ename)))
+        m = self.master.mav.named_value_float_encode(msec, bytearray(ename), value)
+        m.pack(self.master.mav)
+        m._header.srcSystem = att._header.srcSystem
+        m._header.srcComponent = mavutil.mavlink.MAV_COMP_ID_TELEMETRY_RADIO
+        m._header.seq = self.named_float_seq
+        self.named_float_seq = (self.named_float_seq+1) % 256
+        m.name = name
+        self.mpstate.module('link').master_callback(m, self.master)
+    
+    def get_exception_stacktrace(self, e):
+        ret = "%s\n" % e
+        ret += ''.join(traceback.format_exception(type(e), e, tb=e.__traceback__))
+        return ret
+

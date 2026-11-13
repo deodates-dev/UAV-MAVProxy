@@ -21,10 +21,11 @@ else:
 
 from MAVProxy.modules.lib import mp_module
 from MAVProxy.modules.lib import mp_settings
+from MAVProxy.modules.lib.mp_util import decode_flight_sw_version
 
 class UserAlertsModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(UserAlertsModule, self).__init__(mpstate, "useralerts", public=True)
+        super().__init__(mpstate, "useralerts", public=True)
 
         self.url = "https://firmware.ardupilot.org/useralerts/manifest.json"
         self.testurl = "https://firmware.ardupilot.org/useralerts/examplemanifest.json"
@@ -67,9 +68,7 @@ class UserAlertsModule(mp_module.MPModule):
             # board_version : 0, flight_custom_version : [54, 49, 51, 100, 50, 99, 50, 101],
             # middleware_custom_version : [0, 0, 0, 0, 0, 0, 0, 0], os_custom_version : [51, 51, 49, 102, 101, 55, 53, 100],
             # vendor_id : 0, product_id : 0, uid : 0, uid2 : [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}
-            vMajor = hex(m.flight_sw_version)[2]
-            vMinor = hex(m.flight_sw_version)[3]
-            vPatch = hex(m.flight_sw_version)[4]
+            vMajor,vMinor,vPatch,vFwType = decode_flight_sw_version(m.flight_sw_version)
             self.version = "{0}.{1}.{2}".format(vMajor, vMinor, vPatch)
 
         if self.board and self.version:
@@ -143,31 +142,24 @@ class UserAlertsModule(mp_module.MPModule):
         the checks for applicable User Alerts'''
         self.board = None
         self.version = None
-        for messageID in [mavutil.mavlink.MAV_CMD_REQUEST_AUTOPILOT_CAPABILITIES, mavutil.mavlink.MAV_CMD_DO_SEND_BANNER]:
-            self.master.mav.command_long_send(
-                self.settings.target_system,  # target_system
-                self.settings.target_component, # target_component
-                messageID, # command
-                1, # confirmation
-                1, # param1
-                0, # param2
-                0, # param3
-                0, # param4
-                0, # param5
-                0, # param6
-                0) # param7
-        #self.master.mav.command_long_send(
-        #    self.settings.target_system,  # target_system
-        #    self.settings.target_component, # target_component
-        #    mavutil.mavlink.MAV_CMD_DO_SEND_BANNER, # command
-        #    1, # confirmation
-        #    0, # param1
-        #    0, # param2
-        #    0, # param3
-        #    0, # param4
-        #    0, # param5
-        #    0, # param6
-        #    0) # param7
+        self.master.mav.command_long_send(
+            self.settings.target_system,  # target_system
+            self.settings.target_component, # target_component
+            mavutil.mavlink.MAV_CMD_DO_SEND_BANNER, # command
+            1, # confirmation
+            1, # param1
+            0, # param2
+            0, # param3
+            0, # param4
+            0, # param5
+            0, # param6
+            0) # param7
+        self.master.mav.command_long_send(
+            self.settings.target_system,
+            self.settings.target_component,
+            mavutil.mavlink.MAV_CMD_REQUEST_MESSAGE,
+            0, # confirmation
+            mavutil.mavlink.MAVLINK_MSG_ID_AUTOPILOT_VERSION, 0, 0, 0, 0, 0, 0)
 
     def cmd_check(self, args):
         '''Useralert operations'''

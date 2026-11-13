@@ -1,11 +1,11 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''window layout command handling'''
 
 from MAVProxy.modules.lib import mp_module
 
 class LayoutModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(LayoutModule, self).__init__(mpstate, "layout", "window layout handling", public = False)
+        super().__init__(mpstate, "layout", "window layout handling", public = False)
         self.add_command('layout', self.cmd_layout,
                          'window layout management',
                          ["<save|load>"])

@@ -1,6 +1,4 @@
-#!/usr/bin/env python
-
-from __future__ import print_function
+#!/usr/bin/env python3
 
 """
 Currently what I do is run a sync every second and keep the following:
@@ -20,7 +18,7 @@ from MAVProxy.modules.lib import mp_module
 
 class TimeSyncModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(TimeSyncModule, self).__init__(mpstate, "timesync")
+        super().__init__(mpstate, "timesync")
         self.add_command('timesync', self.cmd_timesync, "timesync")
 
     def cmd_timesync(self, args):

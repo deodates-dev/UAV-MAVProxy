@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #***************************************************************************
 #                      Copyright 2017 Jaime Machuca
 #***************************************************************************
@@ -13,7 +13,7 @@
 #
 #                https://github.com/Escadrone/Solo-Mapper.git
 #
-# Environment  : Python 2.7 Code. Intended to be included in MAVproxy as a Module
+# Environment  : Intended to be included in MAVproxy as a Module
 #
 # Responsible  : Jaime Machuca
 #

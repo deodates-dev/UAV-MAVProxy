@@ -8,8 +8,10 @@ from MAVProxy.modules.lib import multiproc
 
 import copyreg
 import mmap
+import os
 import platform
 import struct
+import threading
 
 def pickle_struct(s):
     '''Custom pickle function for struct.Struct'''
@@ -58,12 +60,14 @@ class WrapFileHandle(object):
         return self._filehandle
 
     def __getstate__(self):
-        # capture the filehandle state
+        # capture the filehandle state. Binary file objects (e.g. a
+        # _io.BufferedReader from a dataflash .bin log) don't have the
+        # text-mode encoding/errors/newlines attributes, so default them.
         self._name = self._filehandle.name
         self._mode = self._filehandle.mode
-        self._encoding = self._filehandle.encoding
-        self._errors = self._filehandle.errors
-        self._newlines = self._filehandle.newlines
+        self._encoding = getattr(self._filehandle, 'encoding', None)
+        self._errors = getattr(self._filehandle, 'errors', None)
+        self._newlines = getattr(self._filehandle, 'newlines', None)
         self._offset = self._filehandle.tell()
         
         # copy the dict since we change it
@@ -81,7 +85,11 @@ class WrapFileHandle(object):
         encoding = dict['_encoding']
         errors = dict['_errors']
         newlines = dict['_newlines']
-        filehandle = open(name, mode=mode, encoding=encoding, errors=errors, newline=newlines)
+        if 'b' in mode:
+            # binary mode: open() rejects encoding/errors/newline
+            filehandle = open(name, mode=mode)
+        else:
+            filehandle = open(name, mode=mode, encoding=encoding, errors=errors, newline=newlines)
         
         # set the seek pointer
         offset = dict['_offset']
@@ -198,10 +206,15 @@ class MPChildTask(object):
         with mutex:
             self.wrap()
             try:
-                self._child = multiproc.Process(target=self._child_task)
+                if os.name == 'nt':
+                    # Windows can't pickle the mavlog object, thus can't spin off
+                    self._child = threading.Thread(target=self._child_task)
+                else:
+                    self._child = multiproc.Process(target=self._child_task)
                 self._child.start()
             finally:
-                self.unwrap()
+                if not os.name == 'nt':
+                    self.unwrap()
 
         # deny the parent access to the child end of the pipe
         self.child_pipe_recv.close()
@@ -262,10 +275,10 @@ class MPDataLogChildTask(MPChildTask):
         '''
         Parameters
         ----------
-        mlog : DFReader
+        mlog : DFReader / mavmmaplog
             A dataflash or telemetry log
         '''
-        super(MPDataLogChildTask, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # all attributes are implicitly passed to the child process 
         self._mlog = kwargs['mlog']
@@ -275,10 +288,16 @@ class MPDataLogChildTask(MPChildTask):
         '''Apply custom pickle wrappers to non-pickleable attributes'''
 
         # wrap filehandle and mmap in mlog for pickling
-        filehandle = self._mlog.filehandle
+        if hasattr(self._mlog,'filehandle'):
+            filehandle = self._mlog.filehandle
+        elif hasattr(self._mlog,'f'):
+            filehandle = self._mlog.f
         data_map = self._mlog.data_map
         data_len = self._mlog.data_len
-        self._mlog.filehandle = WrapFileHandle(filehandle)
+        if hasattr(self._mlog,'filehandle'):
+            self._mlog.filehandle = WrapFileHandle(filehandle)
+        elif hasattr(self._mlog,'f'):
+            self._mlog.f = WrapFileHandle(filehandle)
         self._mlog.data_map = WrapMMap(data_map, filehandle, data_len)
 
     # @override
@@ -286,11 +305,14 @@ class MPDataLogChildTask(MPChildTask):
         '''Unwrap custom pickle wrappers of non-pickleable attributes'''
 
         # restore the state of mlog
-        self._mlog.filehandle = self._mlog.filehandle.unwrap()
+        if hasattr(self._mlog,'filehandle'):
+            self._mlog.filehandle = self._mlog.filehandle.unwrap()
+        elif hasattr(self._mlog,'f'):
+            self._mlog.f = self._mlog.f.unwrap()
         self._mlog.data_map = self._mlog.data_map.unwrap()
 
     @property
     def mlog(self):
-        '''The dataflash log (DFReader)'''
+        '''The dataflash or telemetry log (DFReader / mavmmaplog)'''
 
         return self._mlog

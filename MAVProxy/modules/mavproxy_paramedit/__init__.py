@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 param editor module
 Akshath Singhal
@@ -13,9 +13,9 @@ class ParamEditorModule(mp_module.MPModule):
     A Graphical parameter editor for use with MAVProxy
     '''
     def __init__(self, mpstate):
-        super(ParamEditorModule, self).__init__(mpstate,
-                                                "paramedit", "param edit",
-                                                public=True)
+        super().__init__(mpstate,
+                         "paramedit", "param edit",
+                         public=True)
 
         # to work around an issue on MacOS this module is a thin wrapper
         # around a separate ParamEditorMain object
@@ -28,12 +28,21 @@ class ParamEditorModule(mp_module.MPModule):
             self.pe_main.unload()
 
     def idle_task(self):
+        if self.needs_unloading:
+            return
         if not self.pe_main:
             # wait for parameter module to load
             if self.module('param') is None:
                 return
-            from MAVProxy.modules.mavproxy_paramedit import param_editor
-            self.pe_main = param_editor.ParamEditorMain(self.mpstate)
+            try:
+                from MAVProxy.modules.mavproxy_paramedit import param_editor
+                self.pe_main = param_editor.ParamEditorMain(self.mpstate)
+            except Exception as ex:
+                # Report the original failure once, then unload instead of
+                # allocating another editor on every idle cycle.
+                self.needs_unloading = True
+                print('Failed to start parameter editor: %s' % ex)
+                raise
         if self.pe_main:
             if self.pe_main.needs_unloading:
                 self.needs_unloading = True

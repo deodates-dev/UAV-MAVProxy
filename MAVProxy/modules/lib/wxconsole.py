@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
   MAVProxy message console, implemented in a child process
@@ -6,7 +6,7 @@
 import threading
 import sys, time
 
-from MAVProxy.modules.lib.wxconsole_util import Value, Text
+from MAVProxy.modules.lib.wxconsole_util import Value, Text, Title
 from MAVProxy.modules.lib import textconsole
 from MAVProxy.modules.lib import win_layout
 from MAVProxy.modules.lib import multiproc
@@ -16,11 +16,10 @@ class MessageConsole(textconsole.SimpleConsole):
     a message console for MAVProxy
     '''
     def __init__(self,
-                 title='MAVProxy: console',
-                 ico=None):
+                 title='MAVProxy: console'):
         textconsole.SimpleConsole.__init__(self)
         self.title = title
-        self.ico = ico
+        self.closed = False
         self.menu_callback = None
         self.parent_pipe_recv,self.child_pipe_send = multiproc.Pipe(duplex=False)
         self.child_pipe_recv,self.parent_pipe_send = multiproc.Pipe(duplex=False)
@@ -43,7 +42,7 @@ class MessageConsole(textconsole.SimpleConsole):
         from MAVProxy.modules.lib.wx_loader import wx
         from MAVProxy.modules.lib.wxconsole_ui import ConsoleFrame
         app = wx.App(False)
-        app.frame = ConsoleFrame(state=self, title=self.title, ico=self.ico)
+        app.frame = ConsoleFrame(state=self, title=self.title)
         app.frame.SetDoubleBuffered(True)
         app.frame.Show()
         app.MainLoop()
@@ -59,15 +58,18 @@ class MessageConsole(textconsole.SimpleConsole):
                 elif self.menu_callback is not None:
                     self.menu_callback(msg)
                 time.sleep(0.1)
-        except EOFError:
+        except (EOFError, OSError):
             pass
 
     def set_layout(self, layout):
         '''set window layout'''
-        self.parent_pipe_send.send(layout)
+        if not self.closed:
+            self.parent_pipe_send.send(layout)
         
     def write(self, text, fg='black', bg='white'):
         '''write to the console'''
+        if self.closed:
+            return
         try:
             self.parent_pipe_send.send(Text(text, fg, bg))
         except Exception:
@@ -78,6 +80,11 @@ class MessageConsole(textconsole.SimpleConsole):
         if self.is_alive():
             self.parent_pipe_send.send(Value(name, text, row, fg, bg))
 
+    def set_title(self, title):
+        '''set the console window title'''
+        if self.is_alive():
+            self.parent_pipe_send.send(Title(title))
+
     def set_menu(self, menu, callback):
         if self.is_alive():
             self.parent_pipe_send.send(menu)
@@ -85,13 +92,28 @@ class MessageConsole(textconsole.SimpleConsole):
 
     def close(self):
         '''close the console'''
+        if self.closed:
+            return
+        self.closed = True
         self.close_event.set()
-        if self.is_alive():
+        self.child.join(2)
+        if self.child.is_alive():
+            self.child.terminate()
             self.child.join(2)
+        if self.child.is_alive():
+            # A forked GUI may inherit MAVProxy's non-exiting SIGTERM handler.
+            self.child.kill()
+            self.child.join(2)
+        if self.child.is_alive():
+            self.closed = False
+            raise RuntimeError('Console process did not stop')
+        self.child.close()
+        self.parent_pipe_send.close()
+        self.parent_pipe_recv.close()
 
     def is_alive(self):
         '''check if child is still going'''
-        return self.child.is_alive()
+        return not self.closed and self.child.is_alive()
 
 if __name__ == "__main__":
     # test the console

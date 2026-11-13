@@ -3,8 +3,8 @@ readline handling for mavproxy
 '''
 
 import sys, glob, os, platform
-from future.builtins import input
 import re
+
 from pymavlink import mavutil
 
 # some python distributions don't have readline, so handle that case
@@ -41,6 +41,7 @@ class rline(object):
             '(FILENAME)' : complete_filename,
             '(PARAMETER)' : complete_parameter,
             '(VARIABLE)' : complete_variable,
+            '(MESSAGETYPE)' : complete_messagetype,
             '(SETTING)' : rline_mpstate.settings.completion,
             '(COMMAND)' : complete_command,
             '(ALIAS)' : complete_alias,
@@ -73,7 +74,7 @@ class rline(object):
         '''redisplay prompt'''
         try:
             redisplay()
-        except Exception as ex:
+        except NameError:
             pass
             
     def get_prompt(self):
@@ -188,7 +189,7 @@ def complete_variable(text):
     else:
         suffix = ''
 
-    m1 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*(\[[0-9]+\])?)[.]([A-Za-z0-9_]*)$", text)
+    m1 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*(\\[[0-9A-Z_]+\\])?)[.]([A-Za-z0-9_]*)$", text)
     if m1 is not None:
         prefix = m1.group(1)
         mtype = m1.group(2)
@@ -201,7 +202,20 @@ def complete_variable(text):
                     ret.append(prefix + mtype + '.' + f + suffix)
             return ret
         return []
-    m2 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*(\[[0-9]+\])?)$", text)
+
+    # handle partially open arrays, like 'NAMED_VALUE_FLOAT[A'
+    m1 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*(\\[[0-9A-Z_]*))$", text)
+    if m1 is not None:
+        prefix = m1.group(1)
+        mtype = m1.group(2)
+        ret = []
+        for k in list(rline_mpstate.status.msgs.keys()):
+            if k.startswith(mtype):
+                ret.append(prefix + k + suffix)
+        if len(ret):
+            return ret
+
+    m2 = re.match("^(.*?)([A-Z0-9][A-Z0-9_]*(\\[[0-9A-Z_]+\\])?)$", text)
     prefix = m2.group(1)
     mtype = m2.group(2)
     ret = []
@@ -218,6 +232,12 @@ def complete_variable(text):
         pass
 
     return []
+
+def complete_messagetype(text):
+    '''complete a MAVLink message type'''
+    global rline_mpstate
+
+    return list(filter(lambda x : x.startswith(text) and "[" not in x, rline_mpstate.status.msgs.keys()))
 
 def rule_expand(component, text):
     '''expand one rule component'''
@@ -246,19 +266,17 @@ def complete_rule(rule, cmd):
     if len(cmd) == 0:
         return rule_expand(rule_components[0], "")
 
+    # a rule with fewer components than the command has nothing to offer
+    if len(cmd) > len(rule_components):
+        return []
+
     # check it matches so far
     for i in range(len(cmd)-1):
         if not rule_match(rule_components[i], cmd[i]):
             return []
 
     # expand the next rule component
-    expanded = []
-    if platform.system() == 'Windows' and sys.version_info >= (3, 0):
-        if len(rule_components) >= len(cmd):
-            expanded = rule_expand(rule_components[len(cmd)-1], cmd[-1])
-    else:
-        expanded = rule_expand(rule_components[len(cmd)-1], cmd[-1])
-    return expanded
+    return rule_expand(rule_components[len(cmd)-1], cmd[-1])
 
 
 def complete_rules(rules, cmd):

@@ -2,6 +2,7 @@
 send NTRIP data to flight controller
 """
 
+import random
 import time
 
 from MAVProxy.modules.lib import mp_module
@@ -12,7 +13,7 @@ from MAVProxy.modules.lib import mp_settings
 class NtripModule(mp_module.MPModule):
 
     def __init__(self, mpstate):
-        super(NtripModule, self).__init__(mpstate, "ntrip", "ntrip", public=False)
+        super().__init__(mpstate, "ntrip", "ntrip", public=False)
         self.ntrip_settings = mp_settings.MPSettings(
             [('caster', str, None),
              ('port', int, 2101),
@@ -21,6 +22,7 @@ class NtripModule(mp_module.MPModule):
              ('mountpoint', str, None),
              ('logfile', str, None),
              ('sendalllinks', bool, False),
+             ('frag_drop_pct', float, 0),
              ('sendmul', int, 1)])
         self.add_command('ntrip', self.cmd_ntrip, 'NTRIP control',
                          ["<status>",
@@ -74,6 +76,9 @@ class NtripModule(mp_module.MPModule):
                 self.start_pending = True
                 self.last_restart = now
             return
+        if time.time() - self.ntrip.dt_last_gga_sent > 2:
+            self.ntrip.setPosition(self.pos[0], self.pos[1])
+            self.ntrip.send_gga()
         self.log_rtcm(data)
 
         rtcm_id = self.ntrip.get_ID()
@@ -109,6 +114,8 @@ class NtripModule(mp_module.MPModule):
                 links = [self.master]
             for link in links:
                 for d in range(self.ntrip_settings.sendmul):
+                    if random.random() * 100 < self.ntrip_settings.frag_drop_pct:
+                        continue
                     link.mav.gps_rtcm_data_send(flags | (fragment<<1), frag_len, send_data)
             fragment += 1
             blen -= frag_len

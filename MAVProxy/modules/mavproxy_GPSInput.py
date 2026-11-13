@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''
 support for GPS_INPUT message
 '''
@@ -20,7 +20,7 @@ class GPSInputModule(mp_module.MPModule):
                         mavutil.mavlink.GPS_INPUT_IGNORE_FLAG_VERTICAL_ACCURACY)
 
     def __init__(self, mpstate):
-        super(GPSInputModule, self).__init__(mpstate, "GPSInput", "GPS_INPUT message support")
+        super().__init__(mpstate, "GPSInput", "GPS_INPUT message support")
         self.add_command('GPSInput.port', self.cmd_port, 'Port selection', ['<25100>'])
         self.data = {
             'time_usec' : 0,                        # (uint64_t) Timestamp (micros since boot or Unix epoch)

@@ -153,8 +153,10 @@ class HorizonFrame(wx.Frame):
         
     def calcFontScaling(self):
         '''Calculates the current font size and left position for the current window.'''
-        self.ypx = self.figure.get_size_inches()[1]*self.figure.dpi
-        self.xpx = self.figure.get_size_inches()[0]*self.figure.dpi
+        # use fixed DPI to avoid scaling on HiDPI displays
+        dpi = 100.0
+        self.ypx = self.figure.get_size_inches()[1]*dpi
+        self.xpx = self.figure.get_size_inches()[0]*dpi
         self.fontSize = self.vertSize*(self.ypx/2.0)
         self.leftPos = self.axes.get_xlim()[0]
         self.rightPos = self.axes.get_xlim()[1]
@@ -164,8 +166,10 @@ class HorizonFrame(wx.Frame):
         if not self.resized:
             oldypx = self.ypx
             oldxpx = self.xpx
-            self.ypx = self.figure.get_size_inches()[1]*self.figure.dpi
-            self.xpx = self.figure.get_size_inches()[0]*self.figure.dpi
+            # use fixed DPI to match calcFontScaling()
+            dpi = 100.0
+            self.ypx = self.figure.get_size_inches()[1]*dpi
+            self.xpx = self.figure.get_size_inches()[0]*dpi
             if (oldypx != self.ypx) or (oldxpx != self.xpx):
                 self.resized = True
             else:
@@ -173,7 +177,7 @@ class HorizonFrame(wx.Frame):
     
     def createHeadingPointer(self):
         '''Creates the pointer for the current heading.'''
-        self.headingTri = patches.RegularPolygon((0.0,0.80),3,0.05,color='k',zorder=4)
+        self.headingTri = patches.RegularPolygon((0.0,0.80),3,radius=0.05,color='k',zorder=4)
         self.axes.add_patch(self.headingTri)
         self.headingText = self.axes.text(0.0,0.675,'0',color='k',size=self.fontSize,horizontalalignment='center',verticalalignment='center',zorder=4)
     
@@ -184,7 +188,7 @@ class HorizonFrame(wx.Frame):
     
     def createNorthPointer(self):
         '''Creates the north pointer relative to current heading.'''
-        self.headingNorthTri = patches.RegularPolygon((0.0,0.80),3,0.05,color='k',zorder=4)
+        self.headingNorthTri = patches.RegularPolygon((0.0,0.80),3,radius=0.05,color='k',zorder=4)
         self.axes.add_patch(self.headingNorthTri)
         self.headingNorthText = self.axes.text(0.0,0.675,'N',color='k',size=self.fontSize,horizontalalignment='center',verticalalignment='center',zorder=4)    
 
@@ -261,6 +265,8 @@ class HorizonFrame(wx.Frame):
         '''Updates the verticies of the patches for the ground and sky.'''
         ydiff = math.tan(math.radians(-self.roll))*float(self.ratio)
         pitchdiff = self.dist10deg*(self.pitch/10.0)
+        if (self.roll > 90) or (self.roll < -90):
+            pitchdiff = pitchdiff*-1
         # Draw Polygons
         vertsTop = [(-self.ratio,ydiff-pitchdiff),(-self.ratio,1),(self.ratio,1),(self.ratio,-ydiff-pitchdiff),(-self.ratio,ydiff-pitchdiff)]
         vertsBot = [(-self.ratio,ydiff-pitchdiff),(-self.ratio,-1),(self.ratio,-1),(self.ratio,-ydiff-pitchdiff),(-self.ratio,ydiff-pitchdiff)]
@@ -432,7 +438,7 @@ class HorizonFrame(wx.Frame):
     
     def createWPPointer(self):
         '''Creates the waypoint pointer relative to current heading.'''
-        self.headingWPTri = patches.RegularPolygon((0.0,0.55),3,0.05,facecolor='lime',zorder=4,ec='k')
+        self.headingWPTri = patches.RegularPolygon((0.0,0.55),3,radius=0.05,facecolor='lime',zorder=4,ec='k')
         self.axes.add_patch(self.headingWPTri)
         self.headingWPText = self.axes.text(0.0,0.45,'1',color='lime',size=self.fontSize,horizontalalignment='center',verticalalignment='center',zorder=4)   
         self.headingWPText.set_path_effects([PathEffects.withStroke(linewidth=1,foreground='k')]) 
@@ -513,7 +519,7 @@ class HorizonFrame(wx.Frame):
         # Display Plot
         self.altHistRect.set_x(self.leftPos+(self.vertSize/10.0))
         self.altPlot.set_data(x,y)
-        self.altMarker.set_data(self.leftPos+(self.vertSize/10.0)+0.5,val)
+        self.altMarker.set_data([self.leftPos+(self.vertSize/10.0)+0.5],[val])
         self.altText2.set_position((self.leftPos+(4*self.vertSize/10.0)+0.5,val))
         self.altText2.set_size(self.fontSize)
         self.altText2.set_text('%.f m' % self.relAlt)

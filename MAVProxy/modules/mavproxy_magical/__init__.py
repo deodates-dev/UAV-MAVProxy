@@ -17,8 +17,6 @@ Compass calibration helper. This is adapted from Ardupilot's local MAVProxy
 module magcal_graph. Some people read it "magical_graph" at the time of
 release, thus the silly reason for the name of this module.
 """
-from __future__ import print_function
-
 import sys
 
 from pymavlink import mavutil
@@ -34,7 +32,7 @@ except:
 
 class MagicalModule(mp_module.MPModule):
     def __init__(self, mpstate):
-        super(MagicalModule, self).__init__(mpstate, 'magical')
+        super().__init__(mpstate, 'magical')
         self.add_command(
             'magical_ui',
             self.cmd_magical_ui,

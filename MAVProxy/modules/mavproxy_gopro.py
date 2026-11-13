@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 '''gopro control over mavlink for the solo-gimbal
 
 To use this module connect to a Solo with a GoPro installed on the gimbal.
@@ -12,7 +12,7 @@ from pymavlink import mavutil
 class GoProModule(mp_module.MPModule):
 
     def __init__(self, mpstate):
-        super(GoProModule, self).__init__(mpstate, "gopro", "gopro handling")
+        super().__init__(mpstate, "gopro", "gopro handling")
 
         self.add_command('gopro', self.cmd_gopro,   'gopro control', [
                                         'status',
